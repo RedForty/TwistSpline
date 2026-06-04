@@ -111,6 +111,46 @@ def build_reference_rig(prefix="parityTest", num_cvs=4, num_riders=10):
     return spline_tfm, rider
 
 
+def pose_random(spline_node, seed=0, move=2.0, twist_deg=120.0):
+    """Randomly pose a rig so parity gets tested on a genuinely curved + twisted
+    spline (not the trivial straight default).
+
+    Follows the connections into each vertexData slot to find the CV control
+    (offsets its translate) and the twist control (sets its rotateX). Defensive:
+    skips anything locked/connected. Re-run ``compare`` afterwards.
+    """
+    import random
+    spline_node = _resolve_spline(spline_node)
+    rng = random.Random(seed)
+    ec = cmds.getAttr(spline_node + ".vertexData", size=True)
+
+    moved = twisted = 0
+    for i in range(ec):
+        vd = "{}.vertexData[{}]".format(spline_node, i)
+
+        cvcon = cmds.listConnections(vd + ".controlVertex", s=True, d=False) or []
+        if cvcon:
+            ctrl = cvcon[0]
+            for ax in "XYZ":
+                plug = "{}.translate{}".format(ctrl, ax)
+                try:
+                    cmds.setAttr(plug, cmds.getAttr(plug) + rng.uniform(-move, move))
+                    moved += 1
+                except Exception:
+                    pass
+
+        twcon = cmds.listConnections(vd + ".twistValue", s=True, d=False) or []
+        if twcon:
+            try:
+                cmds.setAttr(twcon[0] + ".rotateX", rng.uniform(-twist_deg, twist_deg))
+                twisted += 1
+            except Exception:
+                pass
+
+    print("Posed rig: {} CV translate channels nudged, {} twist controls set."
+          .format(moved, twisted))
+
+
 def _resolve_spline(name):
     """Resolve a transform/shape name to the twistSpline *shape* node.
 
