@@ -25,6 +25,8 @@ replicated transform below.
 """
 
 import json
+import os
+import sys
 from math import radians, fmod
 
 import maya.cmds as cmds
@@ -78,6 +80,35 @@ def find_nodes():
     print("twistSpline shapes : {}".format(splines))
     print("riderConstraints   : {}".format(riders))
     return splines, riders
+
+
+def build_reference_rig(prefix="parityTest", num_cvs=4, num_riders=10):
+    """Build a C++ TwistSpline rig with the original builder, to compare against.
+
+    Returns (spline_transform, rider_constraint). After building, pose it (move
+    some CVs / tangents / twist controls), then call ``compare`` with the names
+    printed here. ``compare`` reads live node state, so you can keep re-posing
+    and re-running it.
+    """
+    if not ensure_plugin():
+        raise RuntimeError("TwistSpline plugin must be loaded to build a rig.")
+
+    # The builder lives in ../scripts relative to this file.
+    scripts_dir = os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import twistSplineBuilder as tsb
+
+    res = tsb.makeTwistSpline(prefix, num_cvs, numJoints=num_riders)
+    spline_tfm, rider = res[7], res[9]
+    print("Built reference rig:")
+    print("  spline transform : {}".format(spline_tfm))
+    print("  rider constraint : {}".format(rider))
+    print("")
+    print("Pose it (move CVs/tangents, dial twist), then run:")
+    print("  maya_parity.compare({!r}, {!r})".format(spline_tfm, rider))
+    return spline_tfm, rider
 
 
 def _resolve_spline(name):
