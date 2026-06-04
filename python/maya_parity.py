@@ -27,7 +27,7 @@ replicated transform below.
 import json
 import os
 import sys
-from math import radians, fmod
+from math import fmod
 
 import maya.cmds as cmds
 import maya.api.OpenMaya as om
@@ -201,6 +201,18 @@ def _decompose(flat16):
     return [t.x, t.y, t.z], [q.w, q.x, q.y, q.z], [s[0], s[1], s[2]]
 
 
+def _angle_rad(plug):
+    """Read an angle plug in radians, regardless of the scene's UI angle unit.
+
+    ``cmds.getAttr`` on an ``MFnUnitAttribute::kAngle`` returns the *UI* unit
+    (degrees by default), but the C++ node reads it with ``.asDouble()`` which
+    is always radians. Using the API plug keeps us in radians to match.
+    """
+    sel = om.MSelectionList()
+    sel.add(plug)
+    return sel.getPlug(0).asMAngle().asRadians()
+
+
 def build_spline_from_node(spline_node, lut_steps=LUT_STEPS):
     """Reconstruct a Python TwistSpline from a C++ ``twistSpline`` node's inputs.
 
@@ -226,7 +238,9 @@ def build_spline_from_node(spline_node, lut_steps=LUT_STEPS):
         got_locks = got_locks or lk > 0.0
 
         twist_lock.append(cmds.getAttr(vd + ".twistWeight"))
-        user_twist.append(cmds.getAttr(vd + ".twistValue") * twist_mul)
+        # twistValue is a kAngle attribute -> read it in radians (the C++ node
+        # uses .asDouble(), i.e. radians), NOT the degrees cmds.getAttr returns.
+        user_twist.append(_angle_rad(vd + ".twistValue") * twist_mul)
 
         ori = cmds.getAttr(vd + ".useOrient")
         orient_lock.append(ori)
@@ -317,8 +331,12 @@ def _rider_pose(rider, idx, order):
     """The rider's actual output pose for param ``idx`` as (translate, quat)."""
     out = "{}.outputs[{}]".format(rider, idx)
     t = cmds.getAttr(out + ".translate")[0]
-    r = cmds.getAttr(out + ".rotate")[0]  # degrees
-    eul = om.MEulerRotation(radians(r[0]), radians(r[1]), radians(r[2]), order)
+    # rotate children are kAngle -> read in radians via the API (don't assume
+    # the UI angle unit is degrees).
+    rx = _angle_rad(out + ".rotateX")
+    ry = _angle_rad(out + ".rotateY")
+    rz = _angle_rad(out + ".rotateZ")
+    eul = om.MEulerRotation(rx, ry, rz, order)
     q = eul.asQuaternion()
     return [t[0], t[1], t[2]], [q.w, q.x, q.y, q.z]
 
