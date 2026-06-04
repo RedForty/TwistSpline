@@ -30,35 +30,33 @@ _VENDOR = "TwistSplinePy"
 _VERSION = "0.1"
 
 
-def _ensure_on_path():
+def _ensure_on_path(plugin):
     """Make the sibling ``twistspline`` package importable.
 
-    Maya executes plugin files without a reliable ``__file__``, so fall back to
-    locating this module via the loaded-plugin list, then to MGlobal's plugin
-    search. If none resolve, the caller is expected to have added the ``python``
-    dir to ``sys.path`` already.
+    Maya executes plugin files without a reliable ``__file__``, so derive the
+    plugin's own directory from ``MFnPlugin.loadPath()`` (the dir it was loaded
+    from) and put it on ``sys.path``.
     """
     here = None
     try:
-        here = os.path.dirname(os.path.abspath(__file__))
-    except NameError:
+        here = plugin.loadPath()
+    except Exception:
+        here = None
+    if not here:
         try:
-            path = om.MFnPlugin.findPlugin("pyTwistSplinePlugin")
-            if path:
-                here = os.path.dirname(path)
-        except Exception:
+            here = os.path.dirname(os.path.abspath(__file__))
+        except NameError:
             here = None
     if here and here not in sys.path:
         sys.path.insert(0, here)
 
 
 def initializePlugin(mobject):
-    _ensure_on_path()
+    plugin = om.MFnPlugin(mobject, _VENDOR, _VERSION)
+    _ensure_on_path(plugin)
     from twistspline.maya.spline_data import TwistSplineData
     from twistspline.maya.spline_node import TwistSplineNode
     from twistspline.maya.draw import TwistSplineDrawOverride
-
-    plugin = om.MFnPlugin(mobject, _VENDOR, _VERSION)
 
     plugin.registerData(
         TwistSplineData.kName, TwistSplineData.kId, TwistSplineData.creator)
@@ -80,12 +78,11 @@ def initializePlugin(mobject):
 
 
 def uninitializePlugin(mobject):
-    _ensure_on_path()
+    plugin = om.MFnPlugin(mobject)
+    _ensure_on_path(plugin)
     from twistspline.maya.spline_node import TwistSplineNode
     from twistspline.maya.spline_data import TwistSplineData
     from twistspline.maya.draw import TwistSplineDrawOverride
-
-    plugin = om.MFnPlugin(mobject)
 
     omr.MDrawRegistry.deregisterDrawOverrideCreator(
         TwistSplineNode.kDrawClassification,
