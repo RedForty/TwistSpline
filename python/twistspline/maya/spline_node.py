@@ -12,6 +12,7 @@ both can be loaded simultaneously (needed for parity testing).
 """
 
 import maya.api.OpenMaya as om
+import maya.api.OpenMayaUI as omui
 
 from ..core import TwistSpline
 from .spline_data import TwistSplineData
@@ -30,7 +31,7 @@ def _decompose(mmatrix):
     return [t.x, t.y, t.z], [q.w, q.x, q.y, q.z], [s[0], s[1], s[2]]
 
 
-class TwistSplineNode(om.MPxLocatorNode):
+class TwistSplineNode(omui.MPxLocatorNode):
     kId = om.MTypeId(0x0013F741)
     kName = "pyTwistSpline"
     kDrawClassification = "drawdb/geometry/pyTwistSpline"
