@@ -37,6 +37,54 @@ LUT_STEPS = 20  # must match the C++ default (TwistSpline() sets lutSteps = 20)
 
 
 # ---------------------------------------------------------------------------
+# Node-name resolution
+# ---------------------------------------------------------------------------
+
+def find_nodes():
+    """Print the twistSpline shapes and riderConstraints in the scene."""
+    splines = cmds.ls(type="twistSpline") or []
+    riders = cmds.ls(type="riderConstraint") or []
+    print("twistSpline shapes : {}".format(splines))
+    print("riderConstraints   : {}".format(riders))
+    return splines, riders
+
+
+def _resolve_spline(name):
+    """Resolve a transform/shape name to the twistSpline *shape* node.
+
+    The twistSpline node is a locator, so a name like 'twistSpline1' is usually
+    the transform -- the attributes live on its shape child.
+    """
+    if not cmds.objExists(name):
+        raise ValueError("No node named '{}'. twistSpline shapes in scene: {}"
+                         .format(name, cmds.ls(type="twistSpline")))
+    if cmds.nodeType(name) == "twistSpline":
+        return name
+    shapes = cmds.listRelatives(name, shapes=True, type="twistSpline",
+                                fullPath=False) or []
+    if shapes:
+        return shapes[0]
+    raise ValueError("'{}' is not a twistSpline and has no twistSpline shape "
+                     "child. twistSpline shapes in scene: {}"
+                     .format(name, cmds.ls(type="twistSpline")))
+
+
+def _resolve_rider(name):
+    """Resolve to a riderConstraint node (it's a DG node, not a DAG shape)."""
+    if not cmds.objExists(name):
+        raise ValueError("No node named '{}'. riderConstraints in scene: {}"
+                         .format(name, cmds.ls(type="riderConstraint")))
+    if cmds.nodeType(name) == "riderConstraint":
+        return name
+    # Tolerate a transform that happens to parent one (rare).
+    rels = cmds.listRelatives(name, shapes=True, type="riderConstraint") or []
+    if rels:
+        return rels[0]
+    raise ValueError("'{}' is not a riderConstraint. riderConstraints in scene: "
+                     "{}".format(name, cmds.ls(type="riderConstraint")))
+
+
+# ---------------------------------------------------------------------------
 # Reading a C++ twistSpline node back into a Python TwistSpline
 # ---------------------------------------------------------------------------
 
@@ -57,6 +105,7 @@ def build_spline_from_node(spline_node, lut_steps=LUT_STEPS):
     inTangent / controlVertex / outTangent, dropping the leading in-tangent and
     trailing out-tangent, and applying the well-posing guards).
     """
+    spline_node = _resolve_spline(spline_node)
     scale_comp = cmds.getAttr(spline_node + ".scaleCompensation")
     twist_mul = cmds.getAttr(spline_node + ".twistMultiplier")
     ecount = cmds.getAttr(spline_node + ".vertexData", size=True)
@@ -191,6 +240,7 @@ def _iter_params(rider):
 def compare(spline_node, rider_node, tol_pos=1e-5, tol_ang_deg=1e-3, verbose=True):
     """Compare the Python kernel against the C++ rider. Returns (max_pos_err,
     max_ang_err_deg) and prints a per-param report when ``verbose``."""
+    rider_node = _resolve_rider(rider_node)
     spline = build_spline_from_node(spline_node)
     g = _rider_globals(rider_node)
 
@@ -228,6 +278,8 @@ def compare(spline_node, rider_node, tol_pos=1e-5, tol_ang_deg=1e-3, verbose=Tru
 
 def dump_golden(spline_node, rider_node, path):
     """Capture inputs + C++ outputs to a JSON golden file for offline regression."""
+    spline_node = _resolve_spline(spline_node)
+    rider_node = _resolve_rider(rider_node)
     scale_comp = cmds.getAttr(spline_node + ".scaleCompensation")
     twist_mul = cmds.getAttr(spline_node + ".twistMultiplier")
     ecount = cmds.getAttr(spline_node + ".vertexData", size=True)
