@@ -19,6 +19,47 @@ from ..core import make_spline, _catmull_tangents
 from .. import _vmath as vm
 
 
+def _make_controls(cvs, name):
+    """Create CV + auto-tangent locators for a control hull.
+
+    Returns (cv_locs, out_locs, in_locs); in_locs[i] is the in-tangent toward
+    cv[i+1], matching the C++ builder's connection layout.
+    """
+    n = len(cvs)
+    out_tans, in_tans = _catmull_tangents(cvs)
+
+    def _loc(pos, nm):
+        loc = cmds.spaceLocator(name=nm)[0]
+        cmds.xform(loc, worldSpace=True, translation=pos)
+        return loc
+
+    cv_locs = [_loc(cvs[i], "{}_cv{}".format(name, i)) for i in range(n)]
+    out_locs = [_loc(out_tans[i], "{}_out{}".format(name, i)) for i in range(n - 1)]
+    in_locs = [_loc(in_tans[i + 1], "{}_in{}".format(name, i + 1)) for i in range(n - 1)]
+    return cv_locs, out_locs, in_locs
+
+
+def _wire_spline(node_type, shape_name, cv_locs, out_locs, in_locs, spread):
+    """Create a spline node of ``node_type`` and wire the controls into it.
+
+    Works for both ``pyTwistSpline`` and the C++ ``twistSpline`` (identical
+    attribute names). Returns the shape node.
+    """
+    shape = cmds.createNode(node_type, name=shape_name)
+    n = len(cv_locs)
+    for i in range(n):
+        vd = "{}.vertexData[{}]".format(shape, i)
+        cmds.connectAttr(cv_locs[i] + ".worldMatrix[0]", vd + ".controlVertex")
+        cmds.setAttr(vd + ".paramValue", i * spread)
+        if i < n - 1:
+            cmds.connectAttr(out_locs[i] + ".worldMatrix[0]", vd + ".outTangent")
+        if i > 0:
+            cmds.connectAttr(in_locs[i - 1] + ".worldMatrix[0]", vd + ".inTangent")
+    cmds.setAttr(shape + ".vertexData[0].paramWeight", 1.0)
+    cmds.setAttr(shape + ".vertexData[0].twistWeight", 1.0)
+    return shape
+
+
 def create_py_spline(cv_positions, spread=3.0, name="pyTwistSpline"):
     """Create a pyTwistSpline node + CV/tangent locators, wired up.
 
@@ -29,38 +70,9 @@ def create_py_spline(cv_positions, spread=3.0, name="pyTwistSpline"):
                            "cmds.loadPlugin('.../python/pyTwistSplinePlugin.py')")
 
     cvs = [list(p) for p in cv_positions]
-    n = len(cvs)
-    out_tans, in_tans = _catmull_tangents(cvs)
-
-    shape = cmds.createNode("pyTwistSpline", name=name + "Shape")
-
-    cv_locs, out_locs, in_locs = [], [], []
-
-    def _loc(pos, nm):
-        loc = cmds.spaceLocator(name=nm)[0]
-        cmds.xform(loc, worldSpace=True, translation=pos)
-        return loc
-
-    for i in range(n):
-        cv_locs.append(_loc(cvs[i], "{}_cv{}".format(name, i)))
-    for i in range(n - 1):
-        out_locs.append(_loc(out_tans[i], "{}_out{}".format(name, i)))
-        in_locs.append(_loc(in_tans[i + 1], "{}_in{}".format(name, i + 1)))
-
-    for i in range(n):
-        vd = "{}.vertexData[{}]".format(shape, i)
-        cmds.connectAttr(cv_locs[i] + ".worldMatrix[0]", vd + ".controlVertex")
-        cmds.setAttr(vd + ".paramValue", i * spread)
-        if i < n - 1:
-            cmds.connectAttr(out_locs[i] + ".worldMatrix[0]", vd + ".outTangent")
-        if i > 0:
-            cmds.connectAttr(in_locs[i - 1] + ".worldMatrix[0]", vd + ".inTangent")
-
-    # Well-pose like the C++ builder: pin the first param + twist.
-    cmds.setAttr(shape + ".vertexData[0].paramWeight", 1.0)
-    cmds.setAttr(shape + ".vertexData[0].twistWeight", 1.0)
+    cv_locs, out_locs, in_locs = _make_controls(cvs, name)
+    shape = _wire_spline("pyTwistSpline", name + "Shape", cv_locs, out_locs, in_locs, spread)
     cmds.setAttr(shape + ".debugDisplay", True)
-
     return shape, cv_locs, out_locs + in_locs
 
 
@@ -142,3 +154,113 @@ def verify_twist_read(shape, cv_positions, cv_index=2, degrees=90.0, samples=50)
         degrees, true_rad, max_norm,
         "OK (radians)" if ok else "MISMATCH (node likely read degrees)"))
     return max_pos, max_norm
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: parity against the C++ riderConstraint
+# ---------------------------------------------------------------------------
+
+# Settable single-valued attributes shared by both rider node types. Maps a
+# friendly key to the attribute name.
+_RIDER_GLOBALS = {
+    "rotateOrder": "rotateOrder", "globalOffset": "globalOffset",
+    "globalSpread": "globalSpread", "scaleCompensation": "scaleCompensation",
+    "useCycle": "useCycle", "normalize": "normalize", "normValue": "normValue",
+    "useGlobalMin": "useGlobalMin", "minGlobalParam": "minGlobalParam",
+    "useGlobalMax": "useGlobalMax", "maxGlobalParam": "maxGlobalParam",
+}
+
+
+def _make_rider(node_type, name, spline_shape, params, rider_globals, parent_inv):
+    """Create a rider of ``node_type`` fed by ``spline_shape`` and ``params``.
+
+    params : list of dicts, each may hold 'param','useMin','minParam','useMax',
+             'maxParam'. parent_inv : transform whose worldInverseMatrix feeds
+             every param's parentInverseMatrix (exercises that path).
+    """
+    rider = cmds.createNode(node_type, name=name)
+    cmds.connectAttr(spline_shape + ".outputSpline", rider + ".inputSplines[0].spline")
+    cmds.connectAttr(spline_shape + ".splineLength", rider + ".inputSplines[0].splineLength")
+    cmds.setAttr(rider + ".inputSplines[0].weight", 1.0)
+
+    for k, v in (rider_globals or {}).items():
+        cmds.setAttr("{}.{}".format(rider, _RIDER_GLOBALS[k]), v)
+
+    for i, pspec in enumerate(params):
+        base = "{}.params[{}]".format(rider, i)
+        cmds.setAttr(base + ".param", pspec.get("param", 0.0))
+        if "useMin" in pspec:
+            cmds.setAttr(base + ".useMin", pspec["useMin"])
+            cmds.setAttr(base + ".minParam", pspec.get("minParam", 0.0))
+        if "useMax" in pspec:
+            cmds.setAttr(base + ".useMax", pspec["useMax"])
+            cmds.setAttr(base + ".maxParam", pspec.get("maxParam", 1.0))
+        if parent_inv is not None:
+            cmds.connectAttr(parent_inv + ".worldInverseMatrix[0]",
+                             base + ".parentInverseMatrix")
+    return rider
+
+
+def create_parity_rig(cv_positions, params, spread=3.0, rider_globals=None,
+                      use_parent=True, name="parity"):
+    """Build parallel py / C++ spline+rider chains from a *single* control hull.
+
+    Both the Python and C++ riders read geometrically-identical splines (proven
+    equal in Phase 0/1) driven by the same locators, so any output difference is
+    a rider-port bug. Returns a dict of node names.
+    """
+    if not cmds.pluginInfo("TwistSpline", q=True, loaded=True):
+        raise RuntimeError("Load the C++ plugin first (cmds.loadPlugin('TwistSpline')).")
+    if not cmds.pluginInfo("pyTwistSplinePlugin", q=True, loaded=True):
+        raise RuntimeError("Load the Python plugin first.")
+
+    cvs = [list(p) for p in cv_positions]
+    cv_locs, out_locs, in_locs = _make_controls(cvs, name + "_ctl")
+
+    py_spline = _wire_spline("pyTwistSpline", name + "_pySplineShape",
+                             cv_locs, out_locs, in_locs, spread)
+    cpp_spline = _wire_spline("twistSpline", name + "_cppSplineShape",
+                              cv_locs, out_locs, in_locs, spread)
+
+    parent = None
+    if use_parent:
+        parent = cmds.createNode("transform", name=name + "_rigParent")
+        cmds.setAttr(parent + ".translate", 1.5, -2.0, 0.75)
+        cmds.setAttr(parent + ".rotate", 20.0, -35.0, 12.0)
+        cmds.setAttr(parent + ".scale", 1.0, 1.0, 1.0)
+
+    py_rider = _make_rider("pyRiderConstraint", name + "_pyRider",
+                           py_spline, params, rider_globals, parent)
+    cpp_rider = _make_rider("riderConstraint", name + "_cppRider",
+                            cpp_spline, params, rider_globals, parent)
+
+    return {
+        "py_spline": py_spline, "cpp_spline": cpp_spline,
+        "py_rider": py_rider, "cpp_rider": cpp_rider,
+        "parent": parent, "cv_locs": cv_locs, "nparams": len(params),
+    }
+
+
+def compare_riders(rig, tol=1e-6):
+    """Compare every output transform of the py rider vs the C++ rider.
+
+    Returns (max_dTranslate, max_dRotate_deg, max_dScale).
+    """
+    py, cpp, nparams = rig["py_rider"], rig["cpp_rider"], rig["nparams"]
+    max_t = max_r = max_s = 0.0
+    for i in range(nparams):
+        for chan, store in (("translate", "t"), ("rotate", "r"), ("scale", "s")):
+            a = cmds.getAttr("{}.outputs[{}].{}".format(py, i, chan))[0]
+            b = cmds.getAttr("{}.outputs[{}].{}".format(cpp, i, chan))[0]
+            d = max(abs(a[k] - b[k]) for k in range(3))
+            if store == "t":
+                max_t = max(max_t, d)
+            elif store == "r":
+                max_r = max(max_r, d)
+            else:
+                max_s = max(max_s, d)
+
+    ok = max_t < tol and max_r < tol and max_s < tol
+    print("py vs C++ rider | dT={:.3e} | dR(deg)={:.3e} | dS={:.3e} | {}".format(
+        max_t, max_r, max_s, "OK" if ok else "MISMATCH"))
+    return max_t, max_r, max_s
