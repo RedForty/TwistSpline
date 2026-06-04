@@ -40,8 +40,39 @@ LUT_STEPS = 20  # must match the C++ default (TwistSpline() sets lutSteps = 20)
 # Node-name resolution
 # ---------------------------------------------------------------------------
 
+def ensure_plugin(autoload=True):
+    """Return True if the TwistSpline node types are available.
+
+    The parity tools compare against the *compiled C++ plugin*, so it must be
+    loaded. If it isn't, optionally try to load it and explain how to fix it.
+    """
+    if "twistSpline" in (cmds.allNodeTypes() or []):
+        return True
+    if autoload:
+        try:
+            cmds.loadPlugin("TwistSpline")
+        except Exception as exc:
+            print("Could not auto-load the 'TwistSpline' plugin: {}".format(exc))
+    if "twistSpline" in (cmds.allNodeTypes() or []):
+        return True
+
+    print("=" * 64)
+    print("The TwistSpline C++ plugin is NOT loaded.")
+    print("Load it, then retry:   cmds.loadPlugin('TwistSpline')")
+    print("(Windows -> Plugin Manager, or point loadPlugin at the .mll path.)")
+    unknown = cmds.ls(type="unknown") or []
+    if unknown:
+        print("")
+        print("This scene also has plugin-less 'unknown' nodes (saved with the")
+        print("plugin but opened without it): {}".format(unknown))
+    print("=" * 64)
+    return False
+
+
 def find_nodes():
     """Print the twistSpline shapes and riderConstraints in the scene."""
+    if not ensure_plugin():
+        return [], []
     splines = cmds.ls(type="twistSpline") or []
     riders = cmds.ls(type="riderConstraint") or []
     print("twistSpline shapes : {}".format(splines))
@@ -55,6 +86,7 @@ def _resolve_spline(name):
     The twistSpline node is a locator, so a name like 'twistSpline1' is usually
     the transform -- the attributes live on its shape child.
     """
+    ensure_plugin()
     if not cmds.objExists(name):
         raise ValueError("No node named '{}'. twistSpline shapes in scene: {}"
                          .format(name, cmds.ls(type="twistSpline")))
