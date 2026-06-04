@@ -96,3 +96,49 @@ def verify_against_kernel(shape, cv_positions, samples=50):
     print("node vs kernel | max dPos={:.3e} | max dNorm={:.3e} | {}".format(
         max_pos, max_norm, "OK" if ok else "MISMATCH"))
     return max_pos, max_norm
+
+
+def verify_twist_read(shape, cv_positions, cv_index=2, degrees=90.0, samples=50):
+    """Confirm the node reads ``twistValue`` (a kAngle attr) in radians.
+
+    Sets a twist on one CV, then reads the plug back as *true internal radians*
+    via the API (sidestepping all UI-unit ambiguity), builds a kernel reference
+    spline with that exact radian twist, and compares. If the node's compute
+    read the angle correctly the two match; if it mistook degrees for radians
+    they diverge wildly.
+    """
+    import math
+
+    attr = "{}.vertexData[{}]".format(shape, cv_index)
+    cmds.setAttr(attr + ".twistValue", degrees)
+    cmds.setAttr(attr + ".twistWeight", 1.0)
+
+    # The exact radian value the node's compute will see off the handle.
+    sel = om.MSelectionList()
+    sel.add(attr + ".twistValue")
+    true_rad = sel.getPlug(0).asMAngle().asRadians()
+
+    node_spline = read_node_spline(shape)
+
+    n = len(cv_positions)
+    user_twists = [0.0] * n
+    user_twists[cv_index] = true_rad
+    twist_locks = [0.0] * n
+    twist_locks[0] = 1.0
+    twist_locks[cv_index] = 1.0
+    ref = make_spline(cv_positions, user_twists=user_twists, twist_locks=twist_locks)
+
+    lo, hi = ref.param_range
+    max_pos = max_norm = 0.0
+    for i in range(samples):
+        t = lo + (hi - lo) * i / (samples - 1)
+        a = node_spline.matrix_at_param(t)
+        b = ref.matrix_at_param(t)
+        max_pos = max(max_pos, vm.length(vm.sub(a.tran, b.tran)))
+        max_norm = max(max_norm, vm.length(vm.sub(a.norm, b.norm)))
+
+    ok = max_pos < 1e-9 and max_norm < 1e-9
+    print("twist read | set {:.1f}deg -> {:.6f}rad | max dNorm={:.3e} | {}".format(
+        degrees, true_rad, max_norm,
+        "OK (radians)" if ok else "MISMATCH (node likely read degrees)"))
+    return max_pos, max_norm
