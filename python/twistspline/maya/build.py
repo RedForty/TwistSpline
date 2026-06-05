@@ -171,17 +171,20 @@ _RIDER_GLOBALS = {
 }
 
 
-def _make_rider(node_type, name, spline_shape, params, rider_globals, parent_inv):
-    """Create a rider of ``node_type`` fed by ``spline_shape`` and ``params``.
+def _make_rider(node_type, name, spline_specs, params, rider_globals, parent_inv):
+    """Create a rider of ``node_type`` fed by one or more weighted splines.
 
-    params : list of dicts, each may hold 'param','useMin','minParam','useMax',
-             'maxParam'. parent_inv : transform whose worldInverseMatrix feeds
-             every param's parentInverseMatrix (exercises that path).
+    spline_specs : list of (spline_shape, weight). params : list of dicts.
+    parent_inv : transform whose worldInverseMatrix feeds every param's
+    parentInverseMatrix (exercises that path).
     """
     rider = cmds.createNode(node_type, name=name)
-    cmds.connectAttr(spline_shape + ".outputSpline", rider + ".inputSplines[0].spline")
-    cmds.connectAttr(spline_shape + ".splineLength", rider + ".inputSplines[0].splineLength")
-    cmds.setAttr(rider + ".inputSplines[0].weight", 1.0)
+    for si, (spline_shape, weight) in enumerate(spline_specs):
+        cmds.connectAttr(spline_shape + ".outputSpline",
+                         "{}.inputSplines[{}].spline".format(rider, si))
+        cmds.connectAttr(spline_shape + ".splineLength",
+                         "{}.inputSplines[{}].splineLength".format(rider, si))
+        cmds.setAttr("{}.inputSplines[{}].weight".format(rider, si), weight)
 
     for k, v in (rider_globals or {}).items():
         cmds.setAttr("{}.{}".format(rider, _RIDER_GLOBALS[k]), v)
@@ -230,15 +233,54 @@ def create_parity_rig(cv_positions, params, spread=3.0, rider_globals=None,
         cmds.setAttr(parent + ".scale", 1.0, 1.0, 1.0)
 
     py_rider = _make_rider("pyRiderConstraint", name + "_pyRider",
-                           py_spline, params, rider_globals, parent)
+                           [(py_spline, 1.0)], params, rider_globals, parent)
     cpp_rider = _make_rider("riderConstraint", name + "_cppRider",
-                            cpp_spline, params, rider_globals, parent)
+                            [(cpp_spline, 1.0)], params, rider_globals, parent)
 
     return {
         "py_spline": py_spline, "cpp_spline": cpp_spline,
         "py_rider": py_rider, "cpp_rider": cpp_rider,
         "parent": parent, "cv_locs": cv_locs, "nparams": len(params),
     }
+
+
+def create_multi_parity_rig(cv_hulls, params, weights, spread=3.0,
+                            rider_globals=None, use_parent=True, name="multiParity"):
+    """Parity rig with *multiple* weighted splines feeding each rider.
+
+    Exercises the multi-spline path: trans/scale/twist weighting, quaternion
+    slerp, and the X-axis twist quaternion. ``cv_hulls`` is a list of control
+    hulls (one per spline); ``weights`` the matching blend weights.
+    """
+    if not cmds.pluginInfo("TwistSpline", q=True, loaded=True):
+        raise RuntimeError("Load the C++ plugin first (cmds.loadPlugin('TwistSpline')).")
+    if not cmds.pluginInfo("pyTwistSplinePlugin", q=True, loaded=True):
+        raise RuntimeError("Load the Python plugin first.")
+
+    py_specs, cpp_specs = [], []
+    for hi, hull in enumerate(cv_hulls):
+        cvs = [list(p) for p in hull]
+        cv_locs, out_locs, in_locs = _make_controls(cvs, "{}_h{}_ctl".format(name, hi))
+        py_s = _wire_spline("pyTwistSpline", "{}_h{}_pyShape".format(name, hi),
+                            cv_locs, out_locs, in_locs, spread)
+        cpp_s = _wire_spline("twistSpline", "{}_h{}_cppShape".format(name, hi),
+                             cv_locs, out_locs, in_locs, spread)
+        py_specs.append((py_s, weights[hi]))
+        cpp_specs.append((cpp_s, weights[hi]))
+
+    parent = None
+    if use_parent:
+        parent = cmds.createNode("transform", name=name + "_rigParent")
+        cmds.setAttr(parent + ".translate", 1.5, -2.0, 0.75)
+        cmds.setAttr(parent + ".rotate", 20.0, -35.0, 12.0)
+
+    py_rider = _make_rider("pyRiderConstraint", name + "_pyRider",
+                           py_specs, params, rider_globals, parent)
+    cpp_rider = _make_rider("riderConstraint", name + "_cppRider",
+                            cpp_specs, params, rider_globals, parent)
+
+    return {"py_rider": py_rider, "cpp_rider": cpp_rider,
+            "parent": parent, "nparams": len(params)}
 
 
 def compare_riders(rig, tol=1e-6):
