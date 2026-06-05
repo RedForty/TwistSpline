@@ -306,3 +306,77 @@ def compare_riders(rig, tol=1e-6):
     print("py vs C++ rider | dT={:.3e} | dR(deg)={:.3e} | dS={:.3e} | {}".format(
         max_t, max_r, max_s, "OK" if ok else "MISMATCH"))
     return max_t, max_r, max_s
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: parity for the twistTangent node
+# ---------------------------------------------------------------------------
+
+def _tan_loc(pos, rot, name):
+    loc = cmds.spaceLocator(name=name)[0]
+    cmds.xform(loc, worldSpace=True, translation=list(pos))
+    if rot != (0.0, 0.0, 0.0):
+        cmds.xform(loc, worldSpace=True, rotation=list(rot))
+    return loc
+
+
+def create_tangent_parity(prev_pos=(-3, 0, 0), cur_pos=(0, 0, 0), next_pos=(3, 1, 1),
+                          in_pos=(1.2, 0.4, 0.0), cur_rot=(10, 25, -8),
+                          auto=0.5, smooth=1.0, weight=1.0, backpoint=False,
+                          endpoint=False, in_linear_target=(0.7, 0.5, 0.2),
+                          use_parent=True, name="tanParity"):
+    """Drive a pyTwistTangent and a C++ twistTangent with identical inputs."""
+    for plug in ("TwistSpline", "pyTwistSplinePlugin"):
+        if not cmds.pluginInfo(plug, q=True, loaded=True):
+            raise RuntimeError("Load both plugins first (missing {}).".format(plug))
+
+    prevT = _tan_loc(prev_pos, (0, 0, 0), name + "_prev")
+    curT = _tan_loc(cur_pos, cur_rot, name + "_cur")
+    nextT = _tan_loc(next_pos, (0, 0, 0), name + "_next")
+    inT = _tan_loc(in_pos, (0, 0, 0), name + "_inTan")
+
+    parent = None
+    if use_parent:
+        parent = cmds.createNode("transform", name=name + "_parent")
+        cmds.setAttr(parent + ".translate", 0.8, -1.1, 0.3)
+        cmds.setAttr(parent + ".rotate", -15.0, 22.0, 9.0)
+
+    nodes = {}
+    for key, node_type in (("py", "pyTwistTangent"), ("cpp", "twistTangent")):
+        n = cmds.createNode(node_type, name="{}_{}".format(name, key))
+        cmds.connectAttr(prevT + ".worldMatrix[0]", n + ".previousVertex")
+        cmds.connectAttr(curT + ".worldMatrix[0]", n + ".currentVertex")
+        cmds.connectAttr(nextT + ".worldMatrix[0]", n + ".nextVertex")
+        cmds.connectAttr(inT + ".worldMatrix[0]", n + ".inTangent")
+        if parent is not None:
+            cmds.connectAttr(parent + ".worldInverseMatrix[0]", n + ".parentInverseMatrix")
+        cmds.setAttr(n + ".auto", auto)
+        cmds.setAttr(n + ".smooth", smooth)
+        cmds.setAttr(n + ".weight", weight)
+        cmds.setAttr(n + ".backpoint", backpoint)
+        cmds.setAttr(n + ".endpoint", endpoint)
+        cmds.setAttr(n + ".inLinearTarget", *in_linear_target, type="double3")
+        nodes[key] = n
+
+    nodes["transforms"] = [prevT, curT, nextT, inT, parent]
+    return nodes
+
+
+def compare_tangents(nodes, tol=1e-6):
+    """Compare every output of the py twistTangent vs the C++ one."""
+    py, cpp = nodes["py"], nodes["cpp"]
+    worst = {}
+    for chan in ("out", "smoothTan", "outLinearTarget", "outTwistUp"):
+        a = cmds.getAttr("{}.{}".format(py, chan))[0]
+        b = cmds.getAttr("{}.{}".format(cpp, chan))[0]
+        worst[chan] = max(abs(a[k] - b[k]) for k in range(3))
+    am = cmds.getAttr(py + ".outTwistMat")
+    bm = cmds.getAttr(cpp + ".outTwistMat")
+    worst["outTwistMat"] = max(abs(am[k] - bm[k]) for k in range(16))
+
+    mx = max(worst.values())
+    ok = mx < tol
+    print("py vs C++ twistTangent | " +
+          " | ".join("{}={:.2e}".format(k, v) for k, v in worst.items()) +
+          " | {}".format("OK" if ok else "MISMATCH"))
+    return worst

@@ -58,6 +58,7 @@ def initializePlugin(mobject):
     from twistspline.maya.spline_node import TwistSplineNode
     from twistspline.maya.draw import TwistSplineDrawOverride
     from twistspline.maya.rider_node import RiderConstraint
+    from twistspline.maya.tangent_node import TwistTangentNode
 
     plugin.registerData(
         TwistSplineData.kName, TwistSplineData.kId, TwistSplineData.creator)
@@ -85,6 +86,14 @@ def initializePlugin(mobject):
         om.MPxNode.kDependNode,
     )
 
+    plugin.registerNode(
+        TwistTangentNode.kName,
+        TwistTangentNode.kId,
+        TwistTangentNode.creator,
+        TwistTangentNode.initialize,
+        om.MPxNode.kDependNode,
+    )
+
 
 def uninitializePlugin(mobject):
     plugin = om.MFnPlugin(mobject)
@@ -93,7 +102,9 @@ def uninitializePlugin(mobject):
     from twistspline.maya.spline_data import TwistSplineData
     from twistspline.maya.draw import TwistSplineDrawOverride
     from twistspline.maya.rider_node import RiderConstraint
+    from twistspline.maya.tangent_node import TwistTangentNode
 
+    plugin.deregisterNode(TwistTangentNode.kId)
     plugin.deregisterNode(RiderConstraint.kId)
     omr.MDrawRegistry.deregisterDrawOverrideCreator(
         TwistSplineNode.kDrawClassification,
