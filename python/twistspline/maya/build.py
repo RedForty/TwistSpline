@@ -380,3 +380,94 @@ def compare_tangents(nodes, tol=1e-6):
           " | ".join("{}={:.2e}".format(k, v) for k, v in worst.items()) +
           " | {}".format("OK" if ok else "MISMATCH"))
     return worst
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: parity for the twistMultiTangent node
+# ---------------------------------------------------------------------------
+
+def create_multi_tangent_parity(cv_positions, in_auto=0.7, out_auto=0.7,
+                                in_smooth=0.8, out_smooth=0.8, in_weight=1.1,
+                                out_weight=0.9, start_tension=2.0, end_tension=2.0,
+                                closed=False, use_parent=True, name="mtanParity"):
+    """Drive a pyTwistMultiTangent and a C++ twistMultiTangent identically.
+
+    Vertex transforms get varied rotations (so vertMat row1/row3 and the
+    local-space user tangents are non-trivial); user tangent controls sit at
+    Catmull-Rom points. Non-1 auto/smooth/weights exercise every blend path.
+    """
+    for plug in ("TwistSpline", "pyTwistSplinePlugin"):
+        if not cmds.pluginInfo(plug, q=True, loaded=True):
+            raise RuntimeError("Load both plugins first (missing {}).".format(plug))
+
+    cvs = [list(p) for p in cv_positions]
+    n = len(cvs)
+    out_tans, in_tans = _catmull_tangents(cvs)
+
+    vert_locs, in_user_locs, out_user_locs = [], [], []
+    for i in range(n):
+        vert_locs.append(_tan_loc(cvs[i], (i * 7.0, -i * 5.0, i * 3.0),
+                                  "{}_v{}".format(name, i)))
+        in_user_locs.append(_tan_loc(in_tans[i], (0, 0, 0), "{}_iu{}".format(name, i)))
+        out_user_locs.append(_tan_loc(out_tans[i], (0, 0, 0), "{}_ou{}".format(name, i)))
+
+    parent = None
+    if use_parent:
+        parent = cmds.createNode("transform", name=name + "_parent")
+        cmds.setAttr(parent + ".translate", -0.6, 1.3, -0.9)
+        cmds.setAttr(parent + ".rotate", 12.0, -28.0, 17.0)
+
+    nodes = {}
+    for key, ntype in (("py", "pyTwistMultiTangent"), ("cpp", "twistMultiTangent")):
+        node = cmds.createNode(ntype, name="{}_{}".format(name, key))
+        cmds.setAttr(node + ".startTension", start_tension)
+        cmds.setAttr(node + ".endTension", end_tension)
+        cmds.setAttr(node + ".closed", closed)
+        for i in range(n):
+            vd = "{}.vertData[{}]".format(node, i)
+            cmds.connectAttr(vert_locs[i] + ".worldMatrix[0]", vd + ".vertMat")
+            cmds.connectAttr(in_user_locs[i] + ".worldMatrix[0]", vd + ".inTanMat")
+            cmds.connectAttr(out_user_locs[i] + ".worldMatrix[0]", vd + ".outTanMat")
+            if parent is not None:
+                for pim in ("inParentInverseMatrix", "outParentInverseMatrix",
+                            "twistParentInverseMatrix"):
+                    cmds.connectAttr(parent + ".worldInverseMatrix[0]", vd + "." + pim)
+            cmds.setAttr(vd + ".inTanWeight", in_weight)
+            cmds.setAttr(vd + ".outTanWeight", out_weight)
+            cmds.setAttr(vd + ".inSmooth", in_smooth)
+            cmds.setAttr(vd + ".outSmooth", out_smooth)
+            cmds.setAttr(vd + ".inAuto", in_auto)
+            cmds.setAttr(vd + ".outAuto", out_auto)
+        nodes[key] = node
+
+    nodes["nverts"] = n
+    return nodes
+
+
+def compare_multi_tangents(nodes, tol=1e-6):
+    """Compare every per-vertex output of the py vs C++ multi-tangent node."""
+    py, cpp, n = nodes["py"], nodes["cpp"], nodes["nverts"]
+    worst = {}
+
+    def _bump(key, val):
+        worst[key] = max(worst.get(key, 0.0), val)
+
+    for i in range(n):
+        for chan in ("inVertTan", "outVertTan", "twistUp"):
+            a = cmds.getAttr("{}.vertTans[{}].{}".format(py, i, chan))[0]
+            b = cmds.getAttr("{}.vertTans[{}].{}".format(cpp, i, chan))[0]
+            _bump(chan, max(abs(a[k] - b[k]) for k in range(3)))
+        for chan in ("inTanLen", "outTanLen"):
+            a = cmds.getAttr("{}.vertTans[{}].{}".format(py, i, chan))
+            b = cmds.getAttr("{}.vertTans[{}].{}".format(cpp, i, chan))
+            _bump(chan, abs(a - b))
+        am = cmds.getAttr("{}.vertTans[{}].twistMat".format(py, i))
+        bm = cmds.getAttr("{}.vertTans[{}].twistMat".format(cpp, i))
+        _bump("twistMat", max(abs(am[k] - bm[k]) for k in range(16)))
+
+    mx = max(worst.values())
+    ok = mx < tol
+    print("py vs C++ multiTangent | " +
+          " | ".join("{}={:.2e}".format(k, v) for k, v in sorted(worst.items())) +
+          " | {}".format("OK" if ok else "MISMATCH"))
+    return worst
