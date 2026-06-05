@@ -245,7 +245,9 @@ class RiderConstraint(om.MPxNode):
         outish = (cls.aOutputs, cls.aTranslate, cls.aTranslateX, cls.aTranslateY,
                   cls.aTranslateZ, cls.aRotate, cls.aRotateX, cls.aRotateY, cls.aRotateZ,
                   cls.aScale, cls.aScaleX, cls.aScaleY, cls.aScaleZ)
-        if plug not in outish:
+        # Compare attribute MObjects, not the MPlug (MPlug-vs-MObject membership
+        # raises "MObject expected" via the reflected comparison).
+        if plug.attribute() not in outish:
             return None
 
         # ---- gather splines (weight > 0, valid data) ----
