@@ -284,7 +284,7 @@ class RiderConstraint(om.MPxNode):
         max_idx = -1
         for i in range(len(pAH)):
             pAH.jumpToPhysicalElement(i)
-            li = pAH.elementIndex()
+            li = pAH.elementLogicalIndex()
             grp = pAH.inputValue()
             by_index[li] = (
                 grp.child(cls.aParam).asDouble(),
