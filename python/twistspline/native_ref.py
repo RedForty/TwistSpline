@@ -170,3 +170,30 @@ def native_frames(cv_positions, joint_params, cv_quats=None, twist_vals=None,
             "binormal": _safe_norm(vm.cross(t, n_)), "twist": ang,
         })
     return out
+
+
+def params_at_fractions(cv_positions, fractions, spread=3.0, lut=400):
+    """Map arc-length fractions (0..1) to kernel params, for matched sampling.
+
+    Lets a motionPath-driven rig (which works in arc-length fraction) be compared
+    against :func:`native_frames` at the same physical points on the curve.
+    """
+    spline = make_spline(cv_positions, spread=spread)
+    lo, hi = spline.param_range
+    sp = [lo + (hi - lo) * i / lut for i in range(lut + 1)]
+    pts = [spline.matrix_at_param(p, twisted=False).tran for p in sp]
+    arc = [0.0]
+    for i in range(1, len(sp)):
+        arc.append(arc[-1] + vm.length(vm.sub(pts[i], pts[i - 1])))
+    total = arc[-1]
+    out = []
+    for fr in fractions:
+        target = fr * total
+        for i in range(len(arc) - 1):
+            if arc[i] <= target <= arc[i + 1]:
+                f = (target - arc[i]) / (arc[i + 1] - arc[i]) if arc[i + 1] > arc[i] else 0.0
+                out.append(sp[i] * (1.0 - f) + sp[i + 1] * f)
+                break
+        else:
+            out.append(hi)
+    return out
