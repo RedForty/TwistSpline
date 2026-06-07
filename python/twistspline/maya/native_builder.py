@@ -253,6 +253,23 @@ def _poci_live(curve_shape, param_plug, name):
     return p
 
 
+def _motionpath(curve_shape, frac_plug, name):
+    """Point at an arc-length FRACTION of the curve (motionPath, fractionMode)."""
+    mp = cmds.createNode("motionPath", name=name)
+    cmds.connectAttr(curve_shape + ".worldSpace[0]", mp + ".geometryPath")
+    cmds.setAttr(mp + ".fractionMode", 1)
+    cmds.connectAttr(frac_plug, mp + ".uValue")
+    return mp  # .allCoordinates
+
+
+def _nearest_param(curve_shape, pos_plug, name):
+    """Curve parameter of the on-curve point nearest pos_plug."""
+    npc = cmds.createNode("nearestPointOnCurve", name=name)
+    cmds.connectAttr(curve_shape + ".worldSpace[0]", npc + ".inputCurve")
+    cmds.connectAttr(pos_plug, npc + ".inPosition")
+    return npc + ".parameter"
+
+
 def _world_y(ctrl, name):
     """World-space Y axis (up) of a transform as a direction vector plug."""
     n = cmds.createNode("vectorProduct", name=name)
@@ -525,7 +542,7 @@ def _add_cv_attrs(ctrl):
 # ---- Stage 1 build --------------------------------------------------------
 
 def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
-                        samples_per_interval=16, pins=None):
+                        samples_per_interval=16, pins=None, orient_cvs=None):
     """Live curve from CV controls + RMF-oriented joints + per-CV control attrs.
 
     Stage 1+2: position via the live degree-3 curve, orientation via a
@@ -559,8 +576,10 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     # Default pin pattern (matches the real rig): twist@CV0, orient@first+last,
     # and the endpoints anchor the param range (Pin is now a live 0..1 blend).
     cmds.setAttr(cv_ctrls[0] + ".UseTwist", 1.0)
-    cmds.setAttr(cv_ctrls[0] + ".UseOrient", 1.0)
-    cmds.setAttr(cv_ctrls[-1] + ".UseOrient", 1.0)
+    # orient-locked CVs (default first+last; pass orient_cvs=[0] to match the C++
+    # builder's CV0-only default for parity).
+    for k in (orient_cvs if orient_cvs is not None else [0, n - 1]):
+        cmds.setAttr(cv_ctrls[k] + ".UseOrient", 1.0)
     cmds.setAttr(cv_ctrls[0] + ".Pin", 1.0)
     cmds.setAttr(cv_ctrls[-1] + ".Pin", 1.0)
     # Extra position pins requested at build time (default the slider to fully on).
@@ -698,22 +717,33 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     rest_remap = solve_param_matrix(pp_rest, arc_rest, pin_rest)
     pmin, pmax = rest_remap[0], rest_remap[-1]
 
-    # ---- joints: rider param -> live curve param via the remap, then sample both
-    # curves there. u_live(t) = sum_k clamp((t-remap[k])/(remap[k+1]-remap[k]),0,1):
-    # monotonic and always in [0,nseg], so joints keep their order and nothing
-    # samples out of range no matter how far the pinned controls are moved.
+    # ---- joints: distribute by ARC LENGTH within the pinned param range, exactly
+    # like the C++ rider. The clamped per-segment fraction
+    #   c_k = clamp((t - remap[k]) / (remap[k+1] - remap[k]), 0, 1)
+    # serves double duty: sum(c_k) is the curve param, sum(c_k * segArc[k]) is the
+    # target arc length. We place the joint at that arc length (motionPath), recover
+    # its curve param (nearestPointOnCurve), and sample the orientation upCurve there.
+    seg_arc = [_sub1(arc_cv[k + 1], arc_cv[k], "{}_segarc{}".format(name, k))
+               for k in range(nseg)]
+    total_arc = arc_cv[-1]
     joints = []
     for j in range(num_joints):
         t_j = pmin + (pmax - pmin) * j / (num_joints - 1.0) if num_joints > 1 else pmin
-        terms = []
+        cterms = []
         for k in range(nseg):
             inv = _mul1(_sub_cp(t_j, remap[k], "{}_jin{}_{}".format(name, j, k)),
                         _sub1(remap[k + 1], remap[k], "{}_jid{}_{}".format(name, j, k)),
                         "{}_ji{}_{}".format(name, j, k), divide=True)
-            terms.append(_clamp01(inv, "{}_jc{}_{}".format(name, j, k)))
-        u_live = _sumN(terms, "{}_ju{}".format(name, j)) if nseg > 1 else terms[0]
-        up_par = _scale1(u_live, float(samples_per_interval), "{}_jus{}".format(name, j))
-        jp = _poci_live(curve_shape, u_live, "{}_jp{}".format(name, j))
+            cterms.append(_clamp01(inv, "{}_jc{}_{}".format(name, j, k)))
+        arc_terms = [_mul1(cterms[k], seg_arc[k], "{}_jat{}_{}".format(name, j, k))
+                     for k in range(nseg)]
+        target_arc = (_sumN(arc_terms, "{}_jta{}".format(name, j))
+                      if nseg > 1 else arc_terms[0])
+        frac = _mul1(target_arc, total_arc, "{}_jfr{}".format(name, j), divide=True)
+        mp = _motionpath(curve_shape, frac, "{}_jmp{}".format(name, j))
+        u_arc = _nearest_param(curve_shape, mp + ".allCoordinates", "{}_jnp{}".format(name, j))
+        jp = _poci_live(curve_shape, u_arc, "{}_jp{}".format(name, j))
+        up_par = _scale1(u_arc, float(samples_per_interval), "{}_jus{}".format(name, j))
         jup = _poci_live(up_curve, up_par, "{}_jup{}".format(name, j))
         up = _reproject(jup + ".position", jp + ".normalizedTangent", "{}_jrp{}".format(name, j))
         jt = cmds.createNode("joint", name="{}_jnt{}".format(name, j), parent=grp)
