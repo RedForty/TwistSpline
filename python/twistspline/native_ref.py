@@ -84,13 +84,14 @@ def _pw_linear_between_locks(values, arclens, locks):
 
 
 def native_frames(cv_positions, joint_params, cv_quats=None, twist_vals=None,
-                  twist_locks=None, orient_locks=None, spread=3.0, samples_per_seg=16):
+                  twist_locks=None, orient_locks=None, spread=3.0, samples_per_seg=16,
+                  tangents=None):
     n = len(cv_positions)
     if cv_quats is None:
         cv_quats = [[1.0, 0.0, 0.0, 0.0]] * n
 
     # Geometry only (a real Maya degree-3 curve is the identical cubic).
-    spline = make_spline(cv_positions, cv_quats=cv_quats, spread=spread)
+    spline = make_spline(cv_positions, cv_quats=cv_quats, spread=spread, tangents=tangents)
     lo, hi = spline.param_range
     num_segs = len(spline.segments)
 

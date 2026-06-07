@@ -742,12 +742,23 @@ def verify_frames(rig, spread=3.0):
         cv_quats.append([q.w, q.x, q.y, q.z])
         orient_locks.append(1.0 if cmds.getAttr(c + ".UseOrient") >= 0.5 else 0.0)
 
+    # Use the curve's LIVE bezier handles so the reference matches any tangent
+    # edits (Weight / Smooth / Auto / manual moves), not just the default shape.
+    nseg = rig["nseg"]
+    in_tans = [None] * n
+    out_tans = [None] * n
+    for k in range(nseg):
+        out_tans[k] = cmds.pointPosition("{}.cv[{}]".format(rig["curve"], 3 * k + 1), world=True)
+        in_tans[k + 1] = cmds.pointPosition("{}.cv[{}]".format(rig["curve"], 3 * k + 2), world=True)
+    tangents = (in_tans, out_tans)
+
     # native_ref param grid (covers the curve), then position-match each joint.
     from ..core import make_spline
-    rng = make_spline(cv_pos, spread=spread).param_range
+    rng = make_spline(cv_pos, spread=spread, tangents=tangents).param_range
     grid = [rng[0] + (rng[1] - rng[0]) * i / 2000 for i in range(2001)]
     ref = native_frames(cv_pos, grid, cv_quats=cv_quats, twist_vals=twist_vals,
-                        twist_locks=twist_locks, orient_locks=orient_locks, spread=spread)
+                        twist_locks=twist_locks, orient_locks=orient_locks, spread=spread,
+                        tangents=tangents)
 
     max_pos = max_frame = 0.0
     for j in rig["joints"]:

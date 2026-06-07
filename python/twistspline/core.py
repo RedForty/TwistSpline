@@ -540,7 +540,7 @@ def _catmull_tangents(cvs):
 
 def make_spline(cv_positions, cv_quats=None, lock_positions=None, lock_values=None,
                 user_twists=None, twist_locks=None, orient_locks=None,
-                spread=3.0, lut_steps=20):
+                spread=3.0, lut_steps=20, tangents=None):
     """Build a :class:`TwistSpline` from a list of CV positions with sensible
     defaults and automatic (Catmull-Rom) bezier tangents.
 
@@ -554,10 +554,15 @@ def make_spline(cv_positions, cv_quats=None, lock_positions=None, lock_values=No
     n = len(cv_positions)
     cvs = [list(p) for p in cv_positions]
 
-    # Default auto bezier tangents, faithful to the real twistMultiTangent node
-    # (half-angle Catmull-Rom, leg-length handles, endpoint tension).
-    from .tangent_ref import multi_tangent_handles
-    in_tans, out_tans = multi_tangent_handles(cvs)
+    if tangents is not None:
+        # explicit (e.g. live/edited) bezier handles: in_tans[i] for i>0,
+        # out_tans[i] for i<n-1
+        in_tans, out_tans = tangents
+    else:
+        # Default auto bezier tangents, faithful to the real twistMultiTangent node
+        # (half-angle Catmull-Rom, leg-length handles, endpoint tension).
+        from .tangent_ref import multi_tangent_handles
+        in_tans, out_tans = multi_tangent_handles(cvs)
 
     # Assemble the interleaved vert array: [cv0, out0, in1, cv1, out1, in2, ...]
     verts = []
