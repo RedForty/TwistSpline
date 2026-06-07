@@ -292,7 +292,8 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     cv_ctrls = []
     for i in range(n):
         c = cmds.spaceLocator(name="{}_cv{}".format(name, i))[0]
-        cmds.parent(c, grp)
+        # full DAG path so a same-named rebuild in one scene stays unambiguous
+        c = cmds.ls(cmds.parent(c, grp)[0], long=True)[0]
         cmds.xform(c, worldSpace=True, translation=cvs[i])
         _add_cv_attrs(c)
         cv_ctrls.append(c)
