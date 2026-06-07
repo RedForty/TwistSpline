@@ -135,12 +135,67 @@ def _build_frame(tan, up, pos, joint, name):
     cmds.connectAttr(dm + ".outputRotate", joint + ".rotate")
 
 
+# ---- scalar / twist helpers (Stage 3) -------------------------------------
+
+def _alen(curve_shape, param, name):
+    n = cmds.createNode("arcLengthDimension", name=name + "Shape")
+    cmds.connectAttr(curve_shape + ".worldSpace[0]", n + ".nurbsGeometry")
+    cmds.setAttr(n + ".uParamValue", param)
+    return n + ".arcLength"
+
+
+def _sub1(a, b, name):
+    n = cmds.createNode("plusMinusAverage", name=name)
+    cmds.setAttr(n + ".operation", 2)
+    cmds.connectAttr(a, n + ".input1D[0]")
+    cmds.connectAttr(b, n + ".input1D[1]")
+    return n + ".output1D"
+
+
+def _mul1(a, b, name, divide=False):
+    n = cmds.createNode("multiplyDivide", name=name)
+    cmds.setAttr(n + ".operation", 2 if divide else 1)
+    cmds.connectAttr(a, n + ".input1X")
+    cmds.connectAttr(b, n + ".input2X")
+    return n + ".outputX"
+
+
+def _add1(a, b, name):
+    n = cmds.createNode("addDoubleLinear", name=name)
+    cmds.connectAttr(a, n + ".input1")
+    cmds.connectAttr(b, n + ".input2")
+    return n + ".output"
+
+
+def _lerp1(a, b, w, name):
+    """a + w*(b-a)."""
+    return _add1(a, _mul1(_sub1(b, a, name + "_d"), w, name + "_wd"), name + "_l")
+
+
+def _apply_twist(up, tan, angle, name):
+    """Rotate unit `up` around unit `tan` by `angle` (radians plug)."""
+    aaq = cmds.createNode("axisAngleToQuat", name=name + "_aaq")
+    cmds.connectAttr(tan, aaq + ".inputAxis")
+    cmds.connectAttr(angle, aaq + ".inputAngle")
+    cm = cmds.createNode("composeMatrix", name=name + "_cm")
+    cmds.setAttr(cm + ".useEulerRotation", 0)
+    cmds.connectAttr(aaq + ".outputQuat", cm + ".inputQuat")
+    vp = cmds.createNode("vectorProduct", name=name + "_rot")
+    cmds.setAttr(vp + ".operation", 3)
+    cmds.connectAttr(up, vp + ".input1")
+    cmds.connectAttr(cm + ".outputMatrix", vp + ".matrix")
+    return vp + ".output"
+
+
 # ---- control attributes ---------------------------------------------------
 
 def _add_cv_attrs(ctrl):
-    for nm, default in (("Twist", 0.0), ("UseTwist", 0.0), ("UseOrient", 0.0)):
-        cmds.addAttr(ctrl, longName=nm, attributeType="double", defaultValue=default,
-                     keyable=True)
+    cmds.addAttr(ctrl, longName="Twist", attributeType="doubleAngle",
+                 defaultValue=0.0, keyable=True)
+    cmds.addAttr(ctrl, longName="UseTwist", attributeType="double",
+                 defaultValue=1.0, min=0.0, max=1.0, keyable=True)
+    cmds.addAttr(ctrl, longName="UseOrient", attributeType="double",
+                 defaultValue=0.0, min=0.0, max=1.0, keyable=True)
 
 
 # ---- Stage 1 build --------------------------------------------------------
@@ -247,11 +302,28 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     for i in range(1, len(pocis)):
         ups[i] = _transport(ups[i - 1], tans[i - 1], tans[i], "{}_tr{}".format(name, i))
 
+    # Stage 3: per-CV twist. Every CV is a twist knot (value = Twist * UseTwist),
+    # interpolated piecewise-linearly by *live* arc length between consecutive CVs.
+    arc_cv = [_alen(curve_shape, float(k), "{}_alenCV{}".format(name, k))
+              for k in range(nseg + 1)]
+    twist_val = [_mul1(cv_ctrls[k] + ".Twist", cv_ctrls[k] + ".UseTwist",
+                       "{}_tval{}".format(name, k)) for k in range(n)]
+
     joints = []
     for j in range(num_joints):
         idx = joint_idx[j]
+        p_j = sample_params[idx]
+        k = min(int(p_j), nseg - 1)  # bracketing segment / CVs k, k+1
+
+        arc_j = _alen(curve_shape, p_j, "{}_alenJ{}".format(name, j))
+        w = _mul1(_sub1(arc_j, arc_cv[k], "{}_wn{}".format(name, j)),
+                  _sub1(arc_cv[k + 1], arc_cv[k], "{}_wd{}".format(name, j)),
+                  "{}_w{}".format(name, j), divide=True)
+        tw = _lerp1(twist_val[k], twist_val[k + 1], w, "{}_tw{}".format(name, j))
+        up_tw = _apply_twist(ups[idx], tans[idx], tw, "{}_atw{}".format(name, j))
+
         jt = cmds.createNode("joint", name="{}_jnt{}".format(name, j), parent=grp)
-        _build_frame(tans[idx], ups[idx], pocis[idx] + ".position", jt,
+        _build_frame(tans[idx], up_tw, pocis[idx] + ".position", jt,
                      "{}_frame{}".format(name, j))
         joints.append(jt)
 
@@ -261,28 +333,35 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
 
 
 def verify_frames(rig, spread=3.0):
-    """Compare joint position + orientation to the kernel at the joints' actual
-    points on the curve (position-inversion, so it's param-space agnostic)."""
-    from ..core import make_spline
+    """Compare joint position + (twisted) orientation to the validated spec.
+
+    Reads the live Twist/UseTwist off the CV controls, evaluates native_ref with
+    every CV pinned (the native rig's regime), and matches each joint to the spec
+    by position-inversion (param-space agnostic)."""
     cv_pos = [cmds.xform(c, q=True, ws=True, t=True) for c in rig["cv_ctrls"]]
-    ker = make_spline(cv_pos, spread=spread)
-    lo, hi = ker.param_range
-    grid = [lo + (hi - lo) * i / 2000 for i in range(2001)]
-    gpos = [ker.matrix_at_param(g, twisted=False).tran for g in grid]
+    n = len(rig["cv_ctrls"])
+    twist_vals = [math.radians(cmds.getAttr(c + ".Twist"))  # doubleAngle -> degrees
+                  * cmds.getAttr(c + ".UseTwist") for c in rig["cv_ctrls"]]
+    twist_locks = [1.0] * n
+
+    # native_ref param grid (covers the curve), then position-match each joint.
+    from ..core import make_spline
+    rng = make_spline(cv_pos, spread=spread).param_range
+    grid = [rng[0] + (rng[1] - rng[0]) * i / 2000 for i in range(2001)]
+    ref = native_frames(cv_pos, grid, twist_vals=twist_vals,
+                        twist_locks=twist_locks, spread=spread)
 
     max_pos = max_frame = 0.0
     for j in rig["joints"]:
         jp = cmds.xform(j, q=True, ws=True, t=True)
-        # nearest kernel param to this joint's world position
-        gi = min(range(len(grid)), key=lambda k: vm.length(vm.sub(gpos[k], jp)))
-        kf = ker.matrix_at_param(grid[gi], twisted=True)
-        max_pos = max(max_pos, vm.length(vm.sub(jp, kf.tran)))
-        # joint's world Y axis (its normal) from its worldMatrix
+        gi = min(range(len(ref)), key=lambda k: vm.length(vm.sub(ref[k]["pos"], jp)))
+        f = ref[gi]
+        max_pos = max(max_pos, vm.length(vm.sub(jp, f["pos"])))
         wm = cmds.xform(j, q=True, ws=True, matrix=True)
-        jy = vm.normalized([wm[4], wm[5], wm[6]])
-        d = max(-1.0, min(1.0, vm.dot(jy, kf.norm)))
+        jy = vm.normalized([wm[4], wm[5], wm[6]])  # joint world Y = its normal
+        d = max(-1.0, min(1.0, vm.dot(jy, f["normal"])))
         max_frame = max(max_frame, math.degrees(math.acos(d)))
     ok = max_pos < 1e-2 and max_frame < 1.0
-    print("native frames vs kernel | max dPos={:.3e} | max dFrame={:.3f} deg | {}".format(
+    print("native frames vs spec | max dPos={:.3e} | max dFrame={:.3f} deg | {}".format(
         max_pos, max_frame, "OK" if ok else "REVIEW"))
     return max_pos, max_frame
