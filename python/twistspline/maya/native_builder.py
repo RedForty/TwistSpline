@@ -161,10 +161,11 @@ def _mul1(a, b, name, divide=False):
 
 
 def _add1(a, b, name):
-    n = cmds.createNode("addDoubleLinear", name=name)
-    cmds.connectAttr(a, n + ".input1")
-    cmds.connectAttr(b, n + ".input2")
-    return n + ".output"
+    n = cmds.createNode("plusMinusAverage", name=name)
+    cmds.setAttr(n + ".operation", 1)  # sum
+    cmds.connectAttr(a, n + ".input1D[0]")
+    cmds.connectAttr(b, n + ".input1D[1]")
+    return n + ".output1D"
 
 
 def _lerp1(a, b, w, name):
