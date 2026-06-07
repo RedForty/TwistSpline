@@ -152,6 +152,13 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     Stage 1+2: position via the live degree-3 curve, orientation via a
     parallel-transport RMF chain. Returns a dict of node names.
     """
+    # matrixNodes (decompose/compose/pointMatrixMult/fourByFourMatrix) and
+    # quatNodes (axisAngleToQuat) ship WITH Maya and auto-load on scene open --
+    # no external files for the animator, just standard Maya requirements.
+    for _plug in ("matrixNodes", "quatNodes"):
+        if not cmds.pluginInfo(_plug, q=True, loaded=True):
+            cmds.loadPlugin(_plug, quiet=True)
+
     cvs = [list(p) for p in cv_positions]
     n = len(cvs)
     nseg = n - 1
