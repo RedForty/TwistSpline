@@ -756,12 +756,16 @@ def verify_frames(rig, spread=3.0):
     tangents = (in_tans, out_tans)
 
     # native_ref param grid (covers the curve), then position-match each joint.
+    # The reference RMF samples uniformly in arc length, so it needs a high sample
+    # count to resolve short, sharply-turning regions (e.g. a hairpin from a
+    # dragged tangent) that the rig's per-segment curve-param sampling handles
+    # natively -- otherwise the *reference* under-resolves and falsely flags the rig.
     from ..core import make_spline
     rng = make_spline(cv_pos, spread=spread, tangents=tangents).param_range
     grid = [rng[0] + (rng[1] - rng[0]) * i / 2000 for i in range(2001)]
     ref = native_frames(cv_pos, grid, cv_quats=cv_quats, twist_vals=twist_vals,
                         twist_locks=twist_locks, orient_locks=orient_locks, spread=spread,
-                        tangents=tangents)
+                        tangents=tangents, samples_per_seg=256)
 
     max_pos = max_frame = 0.0
     for j in rig["joints"]:
