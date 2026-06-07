@@ -173,6 +173,31 @@ def _lerp1(a, b, w, name):
     return _add1(a, _mul1(_sub1(b, a, name + "_d"), w, name + "_wd"), name + "_l")
 
 
+def _signed_angle(a, b, axis, name):
+    """Signed angle from unit `a` to unit `b` measured around unit `axis`.
+
+    Magnitude from angleBetween; sign from sign(cross(a,b) . axis).
+    """
+    ab = cmds.createNode("angleBetween", name=name + "_ab")
+    cmds.connectAttr(a, ab + ".vector1")
+    cmds.connectAttr(b, ab + ".vector2")
+    cr = cmds.createNode("vectorProduct", name=name + "_cr")
+    cmds.setAttr(cr + ".operation", 2)  # cross
+    cmds.connectAttr(a, cr + ".input1")
+    cmds.connectAttr(b, cr + ".input2")
+    dt = cmds.createNode("vectorProduct", name=name + "_dt")
+    cmds.setAttr(dt + ".operation", 1)  # dot
+    cmds.connectAttr(cr + ".output", dt + ".input1")
+    cmds.connectAttr(axis, dt + ".input2")
+    cond = cmds.createNode("condition", name=name + "_sgn")
+    cmds.setAttr(cond + ".operation", 3)  # >=
+    cmds.connectAttr(dt + ".outputX", cond + ".firstTerm")
+    cmds.setAttr(cond + ".secondTerm", 0.0)
+    cmds.setAttr(cond + ".colorIfTrueR", 1.0)
+    cmds.setAttr(cond + ".colorIfFalseR", -1.0)
+    return _mul1(ab + ".angle", cond + ".outColorR", name + "_s")
+
+
 def _apply_twist(up, tan, angle, name):
     """Rotate unit `up` around unit `tan` by `angle` (radians plug)."""
     aaq = cmds.createNode("axisAngleToQuat", name=name + "_aaq")
@@ -280,18 +305,24 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     cmds.connectAttr(cv_pos[-1], "{}.controlPoints[{}]".format(curve_shape, 3 * nseg))
 
     # ---- Stage 2: one parallel-transport chain, sampled by curve parameter.
-    # Joints sit AT chain nodes (param p_j); between consecutive joints we insert
-    # `samples_per_interval-1` fill samples for transport accuracy. All params are
-    # fixed, so the chain is static topology.
-    sample_params, joint_idx = [], []
-    for j in range(num_joints):
-        joint_idx.append(len(sample_params))
-        sample_params.append(j / (num_joints - 1.0) * nseg if num_joints > 1 else 0.0)
-        if j < num_joints - 1:
-            a = j / (num_joints - 1.0) * nseg
-            b = (j + 1) / (num_joints - 1.0) * nseg
+    # Sample params = joint params UNION CV params (so the RMF is available at
+    # each CV for the useOrient residual), with fill points between consecutive
+    # specials for transport accuracy. All params fixed -> static topology.
+    def _jp(j):
+        return round(j / (num_joints - 1.0) * nseg, 9) if num_joints > 1 else 0.0
+
+    specials = sorted(set([_jp(j) for j in range(num_joints)]
+                          + [float(k) for k in range(nseg + 1)]))
+    sample_params, special_index = [], {}
+    for i, sv in enumerate(specials):
+        special_index[sv] = len(sample_params)
+        sample_params.append(sv)
+        if i < len(specials) - 1:
+            nv = specials[i + 1]
             for s in range(1, samples_per_interval):
-                sample_params.append(a + (b - a) * s / samples_per_interval)
+                sample_params.append(sv + (nv - sv) * s / samples_per_interval)
+    joint_idx = [special_index[_jp(j)] for j in range(num_joints)]
+    cv_idx = [special_index[float(k)] for k in range(nseg + 1)]
 
     pocis = [_poci(curve_shape, p, "{}_poci{}".format(name, i))
              for i, p in enumerate(sample_params)]
@@ -310,19 +341,43 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     twist_val = [_mul1(cv_ctrls[k] + ".Twist", cv_ctrls[k] + ".UseTwist",
                        "{}_tval{}".format(name, k)) for k in range(n)]
 
+    # Stage 4: useOrient. Residual at each orient-pinned CV (angle between the RMF
+    # and the control's up, around the tangent) * UseOrient, distributed linearly
+    # by arc length between consecutive orient pins. Pin set read at build time.
+    orient_active = [k for k in range(n) if cmds.getAttr(cv_ctrls[k] + ".UseOrient") >= 0.5]
+    orient_val = {}
+    for k in orient_active:
+        ci = cv_idx[k]
+        cup = _reproject(_world_y(cv_ctrls[k], "{}_oy{}".format(name, k)),
+                         tans[ci], "{}_orp{}".format(name, k))
+        resid = _signed_angle(ups[ci], cup, tans[ci], "{}_res{}".format(name, k))
+        orient_val[k] = _mul1(resid, cv_ctrls[k] + ".UseOrient", "{}_oval{}".format(name, k))
+
     joints = []
     for j in range(num_joints):
         idx = joint_idx[j]
         p_j = sample_params[idx]
         k = min(int(p_j), nseg - 1)  # bracketing segment / CVs k, k+1
-
         arc_j = _alen(curve_shape, p_j, "{}_alenJ{}".format(name, j))
+
         w = _mul1(_sub1(arc_j, arc_cv[k], "{}_wn{}".format(name, j)),
                   _sub1(arc_cv[k + 1], arc_cv[k], "{}_wd{}".format(name, j)),
                   "{}_w{}".format(name, j), divide=True)
-        tw = _lerp1(twist_val[k], twist_val[k + 1], w, "{}_tw{}".format(name, j))
-        up_tw = _apply_twist(ups[idx], tans[idx], tw, "{}_atw{}".format(name, j))
+        angle = _lerp1(twist_val[k], twist_val[k + 1], w, "{}_tw{}".format(name, j))
 
+        if orient_active:
+            lo = max([a for a in orient_active if a <= p_j], default=orient_active[0])
+            hi = min([a for a in orient_active if a >= p_j], default=orient_active[-1])
+            if lo == hi:
+                o_tw = orient_val[lo]
+            else:
+                f = _mul1(_sub1(arc_j, arc_cv[lo], "{}_own{}".format(name, j)),
+                          _sub1(arc_cv[hi], arc_cv[lo], "{}_owd{}".format(name, j)),
+                          "{}_ow{}".format(name, j), divide=True)
+                o_tw = _lerp1(orient_val[lo], orient_val[hi], f, "{}_otw{}".format(name, j))
+            angle = _add1(angle, o_tw, "{}_tot{}".format(name, j))
+
+        up_tw = _apply_twist(ups[idx], tans[idx], angle, "{}_atw{}".format(name, j))
         jt = cmds.createNode("joint", name="{}_jnt{}".format(name, j), parent=grp)
         _build_frame(tans[idx], up_tw, pocis[idx] + ".position", jt,
                      "{}_frame{}".format(name, j))
@@ -339,18 +394,26 @@ def verify_frames(rig, spread=3.0):
     Reads the live Twist/UseTwist off the CV controls, evaluates native_ref with
     every CV pinned (the native rig's regime), and matches each joint to the spec
     by position-inversion (param-space agnostic)."""
+    import maya.api.OpenMaya as om
     cv_pos = [cmds.xform(c, q=True, ws=True, t=True) for c in rig["cv_ctrls"]]
     n = len(rig["cv_ctrls"])
     twist_vals = [math.radians(cmds.getAttr(c + ".Twist"))  # doubleAngle -> degrees
                   * cmds.getAttr(c + ".UseTwist") for c in rig["cv_ctrls"]]
     twist_locks = [1.0] * n
 
+    cv_quats, orient_locks = [], []
+    for c in rig["cv_ctrls"]:
+        q = om.MTransformationMatrix(
+            om.MMatrix(cmds.xform(c, q=True, ws=True, matrix=True))).rotation(asQuaternion=True)
+        cv_quats.append([q.w, q.x, q.y, q.z])
+        orient_locks.append(1.0 if cmds.getAttr(c + ".UseOrient") >= 0.5 else 0.0)
+
     # native_ref param grid (covers the curve), then position-match each joint.
     from ..core import make_spline
     rng = make_spline(cv_pos, spread=spread).param_range
     grid = [rng[0] + (rng[1] - rng[0]) * i / 2000 for i in range(2001)]
-    ref = native_frames(cv_pos, grid, twist_vals=twist_vals,
-                        twist_locks=twist_locks, spread=spread)
+    ref = native_frames(cv_pos, grid, cv_quats=cv_quats, twist_vals=twist_vals,
+                        twist_locks=twist_locks, orient_locks=orient_locks, spread=spread)
 
     max_pos = max_frame = 0.0
     for j in rig["joints"]:
