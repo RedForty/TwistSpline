@@ -64,6 +64,15 @@ def _poci(curve_shape, param, name):
     return p  # .position, .normalizedTangent
 
 
+def _poci_live(curve_shape, param_plug, name):
+    """Like _poci but the parameter is a *live* plug (pin-driven)."""
+    p = cmds.createNode("pointOnCurveInfo", name=name)
+    cmds.connectAttr(curve_shape + ".worldSpace[0]", p + ".inputCurve")
+    cmds.setAttr(p + ".turnOnPercentage", 0)
+    cmds.connectAttr(param_plug, p + ".parameter")
+    return p
+
+
 def _world_y(ctrl, name):
     """World-space Y axis (up) of a transform as a direction vector plug."""
     n = cmds.createNode("vectorProduct", name=name)
@@ -171,6 +180,33 @@ def _add1(a, b, name):
 def _lerp1(a, b, w, name):
     """a + w*(b-a)."""
     return _add1(a, _mul1(_sub1(b, a, name + "_d"), w, name + "_wd"), name + "_l")
+
+
+def _sub_cp(c, plug, name):
+    """const - plug (1D)."""
+    n = cmds.createNode("plusMinusAverage", name=name)
+    cmds.setAttr(n + ".operation", 2)
+    cmds.setAttr(n + ".input1D[0]", c)
+    cmds.connectAttr(plug, n + ".input1D[1]")
+    return n + ".output1D"
+
+
+def _add_pc(plug, c, name):
+    """plug + const (1D)."""
+    n = cmds.createNode("plusMinusAverage", name=name)
+    cmds.setAttr(n + ".operation", 1)
+    cmds.connectAttr(plug, n + ".input1D[0]")
+    cmds.setAttr(n + ".input1D[1]", c)
+    return n + ".output1D"
+
+
+def _scale1(plug, c, name):
+    """plug * const (1D)."""
+    n = cmds.createNode("multiplyDivide", name=name)
+    cmds.setAttr(n + ".operation", 1)
+    cmds.connectAttr(plug, n + ".input1X")
+    cmds.setAttr(n + ".input2X", c)
+    return n + ".outputX"
 
 
 def _signed_angle(a, b, axis, name):
@@ -384,18 +420,61 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     for i in range(len(sample_params)):
         cmds.connectAttr(final_up[i], "{}.controlPoints[{}]".format(up_curve, i))
 
-    # default PinParam = each CV's curve param (the remap is wired in Stage 5b)
+    # default PinParam = each CV's curve param (its position in the param map)
     for k in range(n):
         cmds.setAttr(cv_ctrls[k] + ".PinParam", float(k))
 
-    # ---- joints sample BOTH curves at their param (fixed for now; pinned in 5b).
+    # ---- Stage 5: Pin. The param map (remap) gives each CV's param: a PINNED CV
+    # holds its PinParam; an UNPINNED CV floats to its arc-length position --
+    # interpolated by *live* arc length between the bracketing pins. (This is the
+    # exact reduction of solveParamMatrix under 0/1 pins.) Endpoints are always
+    # anchors so the param range is well defined. Pin SET is read at build time;
+    # PinParam values and arc lengths (hence the stretch) are fully live.
+    pin_set = sorted(set([0, n - 1]
+                         + [k for k in range(n) if cmds.getAttr(cv_ctrls[k] + ".Pin") >= 0.5]))
+    remap = [None] * n
+    for k in pin_set:
+        remap[k] = cv_ctrls[k] + ".PinParam"
+    for k in range(n):
+        if remap[k] is not None:
+            continue
+        lo = max(a for a in pin_set if a < k)
+        hi = min(a for a in pin_set if a > k)
+        frac = _mul1(_sub1(arc_cv[k], arc_cv[lo], "{}_rmn{}".format(name, k)),
+                     _sub1(arc_cv[hi], arc_cv[lo], "{}_rmd{}".format(name, k)),
+                     "{}_rmf{}".format(name, k), divide=True)
+        remap[k] = _lerp1(cv_ctrls[lo] + ".PinParam", cv_ctrls[hi] + ".PinParam",
+                          frac, "{}_rmp{}".format(name, k))
+
+    # Rest remap (numeric, evaluated off the live curve at rest) -- used ONLY to
+    # assign each joint the segment its rider param falls in. Stays valid as long
+    # as pins keep that param inside the segment (true for moderate pinning).
+    arc_rest = [cmds.getAttr(a) for a in arc_cv]
+    pin_par = [cmds.getAttr(cv_ctrls[k] + ".PinParam") for k in range(n)]
+    rest_remap = list(pin_par)
+    for k in range(n):
+        if k in pin_set:
+            continue
+        lo = max(a for a in pin_set if a < k)
+        hi = min(a for a in pin_set if a > k)
+        fr = (arc_rest[k] - arc_rest[lo]) / (arc_rest[hi] - arc_rest[lo])
+        rest_remap[k] = pin_par[lo] + fr * (pin_par[hi] - pin_par[lo])
+    pmin, pmax = rest_remap[0], rest_remap[-1]
+
+    # ---- joints: rider param -> live curve param via the remap, then sample both
+    # curves there. u_live = seg + (t_j - remap[seg]) / (remap[seg+1] - remap[seg]).
     joints = []
     for j in range(num_joints):
-        u_j = j / (num_joints - 1.0) * nseg if num_joints > 1 else 0.0
-        jp = _poci(curve_shape, u_j, "{}_jp{}".format(name, j))
-        # upCurve uses default uniform knots [0..N-1]; a curve param u maps to
-        # upCurve index-param u * samples_per_interval.
-        jup = _poci(up_curve, u_j * samples_per_interval, "{}_jup{}".format(name, j))
+        t_j = pmin + (pmax - pmin) * j / (num_joints - 1.0) if num_joints > 1 else pmin
+        seg = min(max([k for k in range(nseg) if rest_remap[k] <= t_j + 1e-9],
+                      default=0), nseg - 1)
+        local = _mul1(_sub_cp(t_j, remap[seg], "{}_jln{}".format(name, j)),
+                      _sub1(remap[seg + 1], remap[seg], "{}_jld{}".format(name, j)),
+                      "{}_jlf{}".format(name, j), divide=True)
+        u_live = _add_pc(local, float(seg), "{}_ju{}".format(name, j))
+        up_par = _scale1(u_live, float(samples_per_interval), "{}_jus{}".format(name, j))
+        jp = _poci_live(curve_shape, u_live, "{}_jp{}".format(name, j))
+        jup = _poci_live(up_curve, up_par, "{}_jup{}".format(name, j))
         up = _reproject(jup + ".position", jp + ".normalizedTangent", "{}_jrp{}".format(name, j))
         jt = cmds.createNode("joint", name="{}_jnt{}".format(name, j), parent=grp)
         _build_frame(jp + ".normalizedTangent", up, jp + ".position", jt,
