@@ -155,10 +155,13 @@ def test_endpoint_orientation_is_honored():
     lo, hi = spline.param_range
     t_start = spline.matrix_at_param(lo).twist
     t_end = spline.matrix_at_param(hi).twist
-    # The exact end angle depends on the RMF's natural arrival, but locking the
-    # end orientation must produce a non-trivial, smoothly-applied twist.
+    # The exact end angle depends on the RMF's natural arrival (and thus on the
+    # curve's tangents -- with the faithful twistMultiTangent endpoint-tension
+    # tangents the RMF arrives nearer the locked frame, so the residual twist is
+    # smaller than with the old approximate tangents). Locking the end orientation
+    # must still produce a non-trivial, smoothly-applied twist.
     ok = check("end orientation produces a non-zero twist solve",
-               abs(t_end - t_start) > radians(10.0),
+               abs(t_end - t_start) > radians(2.0),
                "delta = {:.2f} deg".format(degrees(t_end - t_start)))
     return ok
 

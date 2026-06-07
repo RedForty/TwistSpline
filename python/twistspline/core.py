@@ -554,7 +554,10 @@ def make_spline(cv_positions, cv_quats=None, lock_positions=None, lock_values=No
     n = len(cv_positions)
     cvs = [list(p) for p in cv_positions]
 
-    out_tans, in_tans = _catmull_tangents(cvs)
+    # Default auto bezier tangents, faithful to the real twistMultiTangent node
+    # (half-angle Catmull-Rom, leg-length handles, endpoint tension).
+    from .tangent_ref import multi_tangent_handles
+    in_tans, out_tans = multi_tangent_handles(cvs)
 
     # Assemble the interleaved vert array: [cv0, out0, in1, cv1, out1, in2, ...]
     verts = []
