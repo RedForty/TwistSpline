@@ -175,12 +175,13 @@ def _build_tangents(name, grp, cv_ctrls, cv_pos, rest_in, rest_out, start_tensio
                              1.0 / 3.0, "{}_ic{}".format(name, i))
         out_coef[i] = _scale1(_mul1(out_len[i], out_w[i], "{}_ocw{}".format(name, i)),
                               1.0 / 3.0, "{}_oc{}".format(name, i))
-        # half-angle bisector tangent direction
-        binv = _norm_v(_cross_v(in_norm[i], out_norm[i], "{}_bn{}".format(name, i)),
-                       "{}_bnn{}".format(name, i))
-        tan = _norm_v(_add(_cross_v(binv, in_norm[i], "{}_t1{}".format(name, i)),
-                           _cross_v(binv, out_norm[i], "{}_t2{}".format(name, i)),
-                           "{}_ts{}".format(name, i)), "{}_td{}".format(name, i))
+        # half-angle bisector of the travel directions = normalize(outNorm - inNorm).
+        # Identical to the C++ cross-of-cross bisector everywhere it's defined (to
+        # ~1e-15) but robust for straight/collinear legs -- it yields the straight-
+        # through tangent instead of dividing by a zero binormal. (Only an exact
+        # fold, inNorm == outNorm, stays degenerate; that's a pathological cusp.)
+        tan = _norm_v(_sub(out_norm[i], in_norm[i], "{}_ts{}".format(name, i)),
+                      "{}_td{}".format(name, i))
         in_smooth[i] = _scale_vp(_scale(tan, -1.0, "{}_nt{}".format(name, i)),
                                  in_coef[i], "{}_ism{}".format(name, i))
         out_smooth[i] = _scale_vp(tan, out_coef[i], "{}_osm{}".format(name, i))
