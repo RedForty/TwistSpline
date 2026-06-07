@@ -288,7 +288,10 @@ def _transport(up_prev, t_prev, t_cur, name):
     cmds.connectAttr(t_prev, ab + ".vector1")
     cmds.connectAttr(t_cur, ab + ".vector2")
     aaq = cmds.createNode("axisAngleToQuat", name=name + "_aaq")
-    cmds.connectAttr(ab + ".axis", aaq + ".inputAxis")
+    # angleBetween.axis is NOT unit length; axisAngleToQuat assumes a unit axis,
+    # so feeding it raw builds a non-unit quaternion -> a small per-step rotation
+    # error that accumulates with the curve's total winding. Normalize it first.
+    cmds.connectAttr(_norm_v(ab + ".axis", name + "_axn"), aaq + ".inputAxis")
     cmds.connectAttr(ab + ".angle", aaq + ".inputAngle")
     cm = cmds.createNode("composeMatrix", name=name + "_cm")
     cmds.setAttr(cm + ".useEulerRotation", 0)
