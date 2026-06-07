@@ -350,7 +350,7 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     # ---- Final up per sample = RMF up rotated by (twist + orient) at that sample.
     final_up = [None] * len(sample_params)
     for i, p_i in enumerate(sample_params):
-        k = min(int(round(p_i + 1e-9)), nseg - 1)
+        k = min(int(p_i + 1e-9), nseg - 1)  # segment = floor(param), clamped
         on_cv = abs(p_i - round(p_i)) < 1e-9
         arc_i = arc_cv[int(round(p_i))] if on_cv else \
             _alen(curve_shape, p_i, "{}_alenS{}".format(name, i))
