@@ -375,7 +375,7 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     # so a joint at any (possibly pinned) param reads its interpolated frame up by
     # sampling -- the curve itself does the interpolation (no per-joint indexing).
     up_tfm = cmds.createNode("transform", name=name + "_upCurveT", parent=grp)
-    tmp2 = cmds.curve(degree=1, knot=list(sample_params),
+    tmp2 = cmds.curve(degree=1,
                       point=[[0.0, float(i), 0.0] for i in range(len(sample_params))])
     shp2 = cmds.listRelatives(tmp2, shapes=True, fullPath=True)[0]
     cmds.parent(shp2, up_tfm, shape=True, relative=True)
@@ -393,7 +393,9 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     for j in range(num_joints):
         u_j = j / (num_joints - 1.0) * nseg if num_joints > 1 else 0.0
         jp = _poci(curve_shape, u_j, "{}_jp{}".format(name, j))
-        jup = _poci(up_curve, u_j, "{}_jup{}".format(name, j))
+        # upCurve uses default uniform knots [0..N-1]; a curve param u maps to
+        # upCurve index-param u * samples_per_interval.
+        jup = _poci(up_curve, u_j * samples_per_interval, "{}_jup{}".format(name, j))
         up = _reproject(jup + ".position", jp + ".normalizedTangent", "{}_jrp{}".format(name, j))
         jt = cmds.createNode("joint", name="{}_jnt{}".format(name, j), parent=grp)
         _build_frame(jp + ".normalizedTangent", up, jp + ".position", jt,
