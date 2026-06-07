@@ -20,6 +20,7 @@ import maya.cmds as cmds
 
 from ..core import _catmull_tangents
 from ..native_ref import params_at_fractions, native_frames
+from ..tangent_ref import multi_tangent_handles
 from .. import _vmath as vm
 
 
@@ -52,6 +53,184 @@ def _scale(a, s, name):
     cmds.connectAttr(a, n + ".input1")
     cmds.setAttr(n + ".input2", s, s, s)
     return n + ".output"
+
+
+def _norm_v(a, name):
+    """Normalize a 3-vector plug."""
+    n = cmds.createNode("vectorProduct", name=name)
+    cmds.setAttr(n + ".operation", 0)  # no-op
+    cmds.setAttr(n + ".normalizeOutput", 1)
+    cmds.connectAttr(a, n + ".input1")
+    return n + ".output"
+
+
+def _cross_v(a, b, name, normalize=False):
+    """Cross product of two 3-vector plugs."""
+    n = cmds.createNode("vectorProduct", name=name)
+    cmds.setAttr(n + ".operation", 2)  # cross
+    cmds.setAttr(n + ".normalizeOutput", 1 if normalize else 0)
+    cmds.connectAttr(a, n + ".input1")
+    cmds.connectAttr(b, n + ".input2")
+    return n + ".output"
+
+
+def _len_v(a, name):
+    """Length of a 3-vector plug (scalar)."""
+    n = cmds.createNode("distanceBetween", name=name)
+    cmds.connectAttr(a, n + ".point1")
+    cmds.setAttr(n + ".point2", 0.0, 0.0, 0.0)
+    return n + ".distance"
+
+
+def _scale_vp(a, s_plug, name):
+    """Scale a 3-vector plug by a scalar plug."""
+    n = cmds.createNode("multiplyDivide", name=name)
+    cmds.connectAttr(a, n + ".input1")
+    for ax in "XYZ":
+        cmds.connectAttr(s_plug, n + ".input2" + ax)
+    return n + ".output"
+
+
+def _lerp_v(a, b, t_plug, name):
+    """a + t*(b-a) for 3-vector plugs `a`,`b` and scalar plug `t`."""
+    return _add(a, _scale_vp(_sub(b, a, name + "_d"), t_plug, name + "_wd"), name + "_l")
+
+
+def _div_vp(a, s_plug, name):
+    """Divide a 3-vector plug by a scalar plug."""
+    n = cmds.createNode("multiplyDivide", name=name)
+    cmds.setAttr(n + ".operation", 2)  # divide
+    cmds.connectAttr(a, n + ".input1")
+    for ax in "XYZ":
+        cmds.connectAttr(s_plug, n + ".input2" + ax)
+    return n + ".output"
+
+
+def _add_tan_attrs(ctrl):
+    cmds.addAttr(ctrl, longName="Auto", attributeType="double",
+                 defaultValue=1.0, min=0.0, max=1.0, keyable=True)
+    cmds.addAttr(ctrl, longName="Smooth", attributeType="double",
+                 defaultValue=1.0, min=0.0, max=1.0, keyable=True)
+    cmds.addAttr(ctrl, longName="Weight", attributeType="double",
+                 defaultValue=1.0, min=0.0, max=3.0, keyable=True)
+
+
+def _build_tangents(name, grp, cv_ctrls, cv_pos, rest_in, rest_out, start_tension=2.0):
+    """Native port of twistMultiTangent handle positions (open spline).
+
+    Creates per-CV in/out tangent controls (children of the CV control) carrying
+    Auto/Smooth/Weight, computes the smooth (half-angle Catmull-Rom, weighted) and
+    linear tangents live, blends smooth<->linear by Smooth and auto<->manual by
+    Auto, and returns (out_handle, in_handle, out_ctrl, in_ctrl). out_handle[i] is
+    valid for i in 0..n-2, in_handle[i] for i in 1..n-1 (others None).
+    """
+    n = len(cv_ctrls)
+    out_ctrl = [None] * n
+    in_ctrl = [None] * n
+    out_w = [None] * n
+    in_w = [None] * n
+    out_s = [None] * n
+    in_s = [None] * n
+    out_a = [None] * n
+    in_a = [None] * n
+    man_out = [None] * n
+    man_in = [None] * n
+    for i in range(n):
+        if i < n - 1:
+            c = cmds.spaceLocator(name="{}_outtan{}".format(name, i))[0]
+            c = cmds.ls(cmds.parent(c, cv_ctrls[i])[0], long=True)[0]
+            cmds.xform(c, worldSpace=True, translation=rest_out[i])
+            _add_tan_attrs(c)
+            out_ctrl[i] = c
+            out_w[i], out_s[i], out_a[i] = c + ".Weight", c + ".Smooth", c + ".Auto"
+            man_out[i] = _decompose(c)
+        if i > 0:
+            c = cmds.spaceLocator(name="{}_intan{}".format(name, i))[0]
+            c = cmds.ls(cmds.parent(c, cv_ctrls[i])[0], long=True)[0]
+            cmds.xform(c, worldSpace=True, translation=rest_in[i])
+            _add_tan_attrs(c)
+            in_ctrl[i] = c
+            in_w[i], in_s[i], in_a[i] = c + ".Weight", c + ".Smooth", c + ".Auto"
+            man_in[i] = _decompose(c)
+
+    # legs: in-leg -> prev CV, out-leg -> next CV (shared length per segment)
+    in_len = [None] * n
+    out_len = [None] * n
+    in_norm = [None] * n
+    out_norm = [None] * n
+    for i in range(1, n):
+        leg = _sub(cv_pos[i - 1], cv_pos[i], "{}_inleg{}".format(name, i))
+        in_len[i] = _len_v(leg, "{}_inlen{}".format(name, i))
+        in_norm[i] = _norm_v(leg, "{}_innrm{}".format(name, i))
+        out_len[i - 1] = in_len[i]
+        out_norm[i - 1] = _scale(in_norm[i], -1.0, "{}_outnrm{}".format(name, i - 1))
+
+    # per-CV handle-length coefficients  len*weight/3
+    in_coef = [None] * n
+    out_coef = [None] * n
+    in_smooth = [None] * n
+    out_smooth = [None] * n
+    for i in range(1, n - 1):
+        in_coef[i] = _scale1(_mul1(in_len[i], in_w[i], "{}_icw{}".format(name, i)),
+                             1.0 / 3.0, "{}_ic{}".format(name, i))
+        out_coef[i] = _scale1(_mul1(out_len[i], out_w[i], "{}_ocw{}".format(name, i)),
+                              1.0 / 3.0, "{}_oc{}".format(name, i))
+        # half-angle bisector tangent direction
+        binv = _norm_v(_cross_v(in_norm[i], out_norm[i], "{}_bn{}".format(name, i)),
+                       "{}_bnn{}".format(name, i))
+        tan = _norm_v(_add(_cross_v(binv, in_norm[i], "{}_t1{}".format(name, i)),
+                           _cross_v(binv, out_norm[i], "{}_t2{}".format(name, i)),
+                           "{}_ts{}".format(name, i)), "{}_td{}".format(name, i))
+        in_smooth[i] = _scale_vp(_scale(tan, -1.0, "{}_nt{}".format(name, i)),
+                                 in_coef[i], "{}_ism{}".format(name, i))
+        out_smooth[i] = _scale_vp(tan, out_coef[i], "{}_osm{}".format(name, i))
+
+    # endpoint smooth tangents (open): extrapolate from the neighbour
+    out_smooth[0] = _scale_vp(
+        _sub(_add(cv_pos[1], _scale(in_smooth[1], start_tension, name + "_e0t"), name + "_e0a"),
+             cv_pos[0], name + "_e0s"),
+        _scale1(out_w[0], 0.5, name + "_e0c"), name + "_osm0")
+    in_smooth[n - 1] = _scale_vp(
+        _sub(_add(cv_pos[n - 2], _scale(out_smooth[n - 2], start_tension, name + "_ent"), name + "_ena"),
+             cv_pos[n - 1], name + "_ens"),
+        _scale1(in_w[n - 1], 0.5, name + "_enc"), "{}_ism{}".format(name, n - 1))
+
+    # linear tangents
+    in_linear = [None] * n
+    out_linear = [None] * n
+    for i in range(1, n - 1):
+        in_dir = _norm_v(_sub(_add(cv_pos[i - 1],
+                                   _scale_vp(out_smooth[i - 1], out_s[i - 1], "{}_ils{}".format(name, i)),
+                                   "{}_ila{}".format(name, i)),
+                              cv_pos[i], "{}_ild{}".format(name, i)), "{}_iln{}".format(name, i))
+        out_dir = _norm_v(_sub(_add(cv_pos[i + 1],
+                                    _scale_vp(in_smooth[i + 1], in_s[i + 1], "{}_ols{}".format(name, i)),
+                                    "{}_ola{}".format(name, i)),
+                               cv_pos[i], "{}_old{}".format(name, i)), "{}_oln{}".format(name, i))
+        in_linear[i] = _scale_vp(in_dir, in_coef[i], "{}_ilin{}".format(name, i))
+        out_linear[i] = _scale_vp(out_dir, out_coef[i], "{}_olin{}".format(name, i))
+    out_linear[0] = _div_vp(
+        _sub(_add(cv_pos[1], _scale_vp(in_smooth[1], in_s[1], name + "_l0s"), name + "_l0a"),
+             cv_pos[0], name + "_l0d"),
+        _sub_cp(3.0, in_s[1], name + "_l0n"), name + "_olin0")
+    in_linear[n - 1] = _div_vp(
+        _sub(_add(cv_pos[n - 2], _scale_vp(out_smooth[n - 2], out_s[n - 2], name + "_lns"), name + "_lna"),
+             cv_pos[n - 1], name + "_lnd"),
+        _sub_cp(3.0, out_s[n - 2], name + "_lnn"), "{}_ilin{}".format(name, n - 1))
+
+    # blend smooth<->linear (Smooth) then auto<->manual (Auto), add to CV
+    out_handle = [None] * n
+    in_handle = [None] * n
+    for i in range(n):
+        if i < n - 1:
+            auto_vec = _lerp_v(out_linear[i], out_smooth[i], out_s[i], "{}_oav{}".format(name, i))
+            auto_h = _add(cv_pos[i], auto_vec, "{}_oah{}".format(name, i))
+            out_handle[i] = _lerp_v(man_out[i], auto_h, out_a[i], "{}_oh{}".format(name, i))
+        if i > 0:
+            auto_vec = _lerp_v(in_linear[i], in_smooth[i], in_s[i], "{}_iav{}".format(name, i))
+            auto_h = _add(cv_pos[i], auto_vec, "{}_iah{}".format(name, i))
+            in_handle[i] = _lerp_v(man_in[i], auto_h, in_a[i], "{}_ih{}".format(name, i))
+    return out_handle, in_handle, out_ctrl, in_ctrl
 
 
 # ---- RMF transport node clusters (Stage 2) --------------------------------
@@ -358,7 +537,8 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     cvs = [list(p) for p in cv_positions]
     n = len(cvs)
     nseg = n - 1
-    out_tans, in_tans = _catmull_tangents(cvs)
+    # rest (default) bezier handle positions from the faithful tangent reference
+    rest_in, rest_out = multi_tangent_handles(cvs)
 
     grp = cmds.createNode("transform", name=name + "_grp")
     curve_tfm = cmds.createNode("transform", name=name + "_curve", parent=grp)
@@ -385,28 +565,11 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
 
     cv_pos = [_decompose(c) for c in cv_ctrls]
 
-    # Auto bezier tangents (Catmull-Rom) computed live by nodes.
-    out_plug = [None] * n
-    in_plug = [None] * n
-    for k in range(n):
-        cur = cv_pos[k]
-        if k == 0:
-            m = _sub(cv_pos[1], cur, "{}_m{}".format(name, k))
-        elif k == n - 1:
-            m = _sub(cur, cv_pos[k - 1], "{}_m{}".format(name, k))
-        else:
-            m = _scale(_sub(cv_pos[k + 1], cv_pos[k - 1], "{}_mr{}".format(name, k)),
-                       0.5, "{}_m{}".format(name, k))
-        m3 = _scale(m, 1.0 / 3.0, "{}_m3_{}".format(name, k))
-        if k < n - 1:
-            out_plug[k] = _add(cur, m3, "{}_out{}".format(name, k))
-        if k > 0:
-            in_plug[k] = _sub(cur, m3, "{}_in{}".format(name, k))
-
     # Degree-3 bezier-form curve: control points [cv0, out0, in1, cv1, out1, ...].
+    # Default handle positions come from the faithful tangent reference.
     init_pts = []
     for k in range(nseg):
-        init_pts.extend([cvs[k], out_tans[k], in_tans[k + 1]])
+        init_pts.extend([cvs[k], rest_out[k], rest_in[k + 1]])
     init_pts.append(cvs[-1])
     # Bezier knot vector: internal joints have multiplicity 3.
     knots = ([0.0, 0.0, 0.0]
@@ -419,11 +582,18 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     cmds.delete(tmp)
     curve_shape = cmds.listRelatives(curve_tfm, shapes=True)[0]
 
-    # Drive every control point from the live CV / tangent plugs.
+    # ---- Stage 6: tangent controls (in/out per CV, with Auto/Smooth/Weight).
+    # Faithful port of twistMultiTangent: half-angle Catmull-Rom smooth tangents,
+    # smooth<->linear blend, manual override, all live. Everything downstream rides
+    # the curve, so no other stage changes.
+    out_handle, in_handle, out_ctrl, in_ctrl = _build_tangents(
+        name, grp, cv_ctrls, cv_pos, rest_in, rest_out)
+
+    # Drive every control point from the live CV / tangent-handle plugs.
     for k in range(nseg):
         cmds.connectAttr(cv_pos[k], "{}.controlPoints[{}]".format(curve_shape, 3 * k))
-        cmds.connectAttr(out_plug[k], "{}.controlPoints[{}]".format(curve_shape, 3 * k + 1))
-        cmds.connectAttr(in_plug[k + 1], "{}.controlPoints[{}]".format(curve_shape, 3 * k + 2))
+        cmds.connectAttr(out_handle[k], "{}.controlPoints[{}]".format(curve_shape, 3 * k + 1))
+        cmds.connectAttr(in_handle[k + 1], "{}.controlPoints[{}]".format(curve_shape, 3 * k + 2))
     cmds.connectAttr(cv_pos[-1], "{}.controlPoints[{}]".format(curve_shape, 3 * nseg))
 
     # ---- RMF transport chain, sampled densely by curve PARAMETER (a CV at each
@@ -548,7 +718,8 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
         joints.append(jt)
 
     return {"grp": grp, "cv_ctrls": cv_ctrls, "joints": joints,
-            "curve": curve_shape, "up_curve": up_curve, "nseg": nseg}
+            "curve": curve_shape, "up_curve": up_curve, "nseg": nseg,
+            "out_ctrl": out_ctrl, "in_ctrl": in_ctrl}
 
 
 def verify_frames(rig, spread=3.0):
@@ -592,3 +763,43 @@ def verify_frames(rig, spread=3.0):
     print("native frames vs spec | max dPos={:.3e} | max dFrame={:.3f} deg | {}".format(
         max_pos, max_frame, "OK" if ok else "REVIEW"))
     return max_pos, max_frame
+
+
+def verify_tangents(rig):
+    """Compare the live bezier-handle positions on the curve to the faithful
+    tangent reference (multi_tangent_handles), reading the current
+    Weight/Smooth/Auto and any manual tangent-control offsets off the rig."""
+    n = len(rig["cv_ctrls"])
+    cvs = [cmds.xform(c, q=True, ws=True, t=True) for c in rig["cv_ctrls"]]
+    in_w, out_w = [1.0] * n, [1.0] * n
+    in_s, out_s = [1.0] * n, [1.0] * n
+    in_a, out_a = [1.0] * n, [1.0] * n
+    in_user = [[0.0, 0.0, 0.0] for _ in range(n)]
+    out_user = [[0.0, 0.0, 0.0] for _ in range(n)]
+    for i in range(n):
+        oc, ic = rig["out_ctrl"][i], rig["in_ctrl"][i]
+        if oc:
+            out_w[i] = cmds.getAttr(oc + ".Weight")
+            out_s[i] = cmds.getAttr(oc + ".Smooth")
+            out_a[i] = cmds.getAttr(oc + ".Auto")
+            cw = cmds.xform(oc, q=True, ws=True, t=True)
+            out_user[i] = [cw[k] - cvs[i][k] for k in range(3)]
+        if ic:
+            in_w[i] = cmds.getAttr(ic + ".Weight")
+            in_s[i] = cmds.getAttr(ic + ".Smooth")
+            in_a[i] = cmds.getAttr(ic + ".Auto")
+            cw = cmds.xform(ic, q=True, ws=True, t=True)
+            in_user[i] = [cw[k] - cvs[i][k] for k in range(3)]
+    inh, outh = multi_tangent_handles(cvs, in_w, out_w, in_s, out_s,
+                                      in_a, out_a, in_user, out_user)
+    nseg = rig["nseg"]
+    maxd = 0.0
+    for k in range(nseg):
+        op = cmds.pointPosition("{}.cv[{}]".format(rig["curve"], 3 * k + 1), world=True)
+        ip = cmds.pointPosition("{}.cv[{}]".format(rig["curve"], 3 * k + 2), world=True)
+        maxd = max(maxd, vm.length(vm.sub(op, outh[k])))
+        maxd = max(maxd, vm.length(vm.sub(ip, inh[k + 1])))
+    ok = maxd < 1e-4
+    print("native tangents vs reference | max dHandle={:.3e} | {}".format(
+        maxd, "OK" if ok else "REVIEW"))
+    return maxd
