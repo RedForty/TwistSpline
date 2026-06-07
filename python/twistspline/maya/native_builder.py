@@ -209,6 +209,63 @@ def _scale1(plug, c, name):
     return n + ".outputX"
 
 
+def _solve_param_remap(name, pin, pp, arc):
+    """Native Thomas solve of solveParamMatrix -> a live remap-param plug per CV.
+
+    `pin[i]`/`pp[i]` are the Pin/PinParam attr plugs and `arc[i]` the cumulative
+    arc-length plugs. The row equation rearranges to
+        x[i] = Pin[i]*PinParam[i] + (1-Pin[i])*((1-A)x[i-1] + A x[i+1])
+    so any *fractional* Pin is exact -- this runs the full tridiagonal solve live
+    (every diagonal is -1, so the Thomas recurrence is a short node chain).
+    """
+    n = len(pin)
+    oml = [_sub_cp(1.0, pin[i], "{}_oml{}".format(name, i)) for i in range(n)]  # 1-Pin
+    sub = [None] * n
+    sup = [None] * n
+    res = [None] * n
+    # start row: [0, -1, 1-lv0],  res = -lv0*rv0 + (1-lv0)(cv1-cv0)
+    sup[0] = oml[0]
+    res[0] = _add1(_scale1(_mul1(pin[0], pp[0], name + "_r0a"), -1.0, name + "_r0b"),
+                   _mul1(oml[0], _sub1(arc[1], arc[0], name + "_r0c"), name + "_r0d"),
+                   name + "_res0")
+    # interior rows
+    for i in range(1, n - 1):
+        A = _mul1(_sub1(arc[i], arc[i - 1], "{}_An{}".format(name, i)),
+                  _sub1(arc[i + 1], arc[i - 1], "{}_Ad{}".format(name, i)),
+                  "{}_A{}".format(name, i), divide=True)
+        sub[i] = _mul1(oml[i], _sub_cp(1.0, A, "{}_omA{}".format(name, i)),
+                       "{}_sub{}".format(name, i))
+        sup[i] = _mul1(oml[i], A, "{}_sup{}".format(name, i))
+        res[i] = _scale1(_mul1(pin[i], pp[i], "{}_ria{}".format(name, i)), -1.0,
+                         "{}_res{}".format(name, i))
+    # end row: [1-lve, -1, 0],  res = -lve*rve - (1-lve)(cve-cv_{e-1})
+    e = n - 1
+    sub[e] = oml[e]
+    res[e] = _sub1(_scale1(_mul1(pin[e], pp[e], name + "_rea"), -1.0, name + "_reb"),
+                   _mul1(oml[e], _sub1(arc[e], arc[e - 1], name + "_rec"), name + "_red"),
+                   name + "_rese")
+    # Thomas forward sweep (diag == -1)
+    c = [None] * n
+    d = [None] * n
+    c[0] = _scale1(sup[0], -1.0, name + "_c0")
+    d[0] = _scale1(res[0], -1.0, name + "_d0")
+    for i in range(1, n):
+        denom = _sub_cp(-1.0, _mul1(sub[i], c[i - 1], "{}_sc{}".format(name, i)),
+                        "{}_den{}".format(name, i))
+        if i < n - 1:
+            c[i] = _mul1(sup[i], denom, "{}_c{}".format(name, i), divide=True)
+        num = _sub1(res[i], _mul1(sub[i], d[i - 1], "{}_sd{}".format(name, i)),
+                    "{}_num{}".format(name, i))
+        d[i] = _mul1(num, denom, "{}_d{}".format(name, i), divide=True)
+    # back substitution
+    x = [None] * n
+    x[n - 1] = d[n - 1]
+    for i in range(n - 2, -1, -1):
+        x[i] = _sub1(d[i], _mul1(c[i], x[i + 1], "{}_bx{}".format(name, i)),
+                     "{}_x{}".format(name, i))
+    return x
+
+
 def _signed_angle(a, b, axis, name):
     """Signed angle from unit `a` to unit `b` measured around unit `axis`.
 
@@ -297,11 +354,14 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
         cmds.xform(c, worldSpace=True, translation=cvs[i])
         _add_cv_attrs(c)
         cv_ctrls.append(c)
-    # Default pin pattern (matches the real rig): twist@CV0, orient@first+last.
+    # Default pin pattern (matches the real rig): twist@CV0, orient@first+last,
+    # and the endpoints anchor the param range (Pin is now a live 0..1 blend).
     cmds.setAttr(cv_ctrls[0] + ".UseTwist", 1.0)
     cmds.setAttr(cv_ctrls[0] + ".UseOrient", 1.0)
     cmds.setAttr(cv_ctrls[-1] + ".UseOrient", 1.0)
-    # Position pins (param-map anchors) requested at build time.
+    cmds.setAttr(cv_ctrls[0] + ".Pin", 1.0)
+    cmds.setAttr(cv_ctrls[-1] + ".Pin", 1.0)
+    # Extra position pins requested at build time (default the slider to fully on).
     for k in (pins or []):
         cmds.setAttr(cv_ctrls[k] + ".Pin", 1.0)
 
@@ -429,40 +489,21 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
         cmds.setAttr(cv_ctrls[k] + ".PinParam", float(k))
 
     # ---- Stage 5: Pin. The param map (remap) gives each CV's param: a PINNED CV
-    # holds its PinParam; an UNPINNED CV floats to its arc-length position --
-    # interpolated by *live* arc length between the bracketing pins. (This is the
-    # exact reduction of solveParamMatrix under 0/1 pins.) Endpoints are always
-    # anchors so the param range is well defined. Pin SET is read at build time;
-    # PinParam values and arc lengths (hence the stretch) are fully live.
-    pin_set = sorted(set([0, n - 1]
-                         + [k for k in range(n) if cmds.getAttr(cv_ctrls[k] + ".Pin") >= 0.5]))
-    remap = [None] * n
-    for k in pin_set:
-        remap[k] = cv_ctrls[k] + ".PinParam"
-    for k in range(n):
-        if remap[k] is not None:
-            continue
-        lo = max(a for a in pin_set if a < k)
-        hi = min(a for a in pin_set if a > k)
-        frac = _mul1(_sub1(arc_cv[k], arc_cv[lo], "{}_rmn{}".format(name, k)),
-                     _sub1(arc_cv[hi], arc_cv[lo], "{}_rmd{}".format(name, k)),
-                     "{}_rmf{}".format(name, k), divide=True)
-        remap[k] = _lerp1(cv_ctrls[lo] + ".PinParam", cv_ctrls[hi] + ".PinParam",
-                          frac, "{}_rmp{}".format(name, k))
+    # holds its PinParam; an UNPINNED CV floats to its arc-length position. This is
+    # the full solveParamMatrix, run live as a native Thomas-solve node chain, so
+    # Pin is a *live* 0..1 blend (no rebuild to toggle) and exact at every value.
+    remap = _solve_param_remap(name + "_pin",
+                               [cv_ctrls[k] + ".Pin" for k in range(n)],
+                               [cv_ctrls[k] + ".PinParam" for k in range(n)], arc_cv)
 
-    # Rest remap (numeric, evaluated off the live curve at rest) -- used ONLY to
-    # assign each joint the segment its rider param falls in. Stays valid as long
-    # as pins keep that param inside the segment (true for moderate pinning).
+    # Rest remap via the kernel solver -- used ONLY to assign each joint the segment
+    # its rider param falls in. Valid as long as pins keep that param inside the
+    # segment (true for moderate pinning).
+    from ..solve import solve_param_matrix
     arc_rest = [cmds.getAttr(a) for a in arc_cv]
-    pin_par = [cmds.getAttr(cv_ctrls[k] + ".PinParam") for k in range(n)]
-    rest_remap = list(pin_par)
-    for k in range(n):
-        if k in pin_set:
-            continue
-        lo = max(a for a in pin_set if a < k)
-        hi = min(a for a in pin_set if a > k)
-        fr = (arc_rest[k] - arc_rest[lo]) / (arc_rest[hi] - arc_rest[lo])
-        rest_remap[k] = pin_par[lo] + fr * (pin_par[hi] - pin_par[lo])
+    pin_rest = [cmds.getAttr(cv_ctrls[k] + ".Pin") for k in range(n)]
+    pp_rest = [cmds.getAttr(cv_ctrls[k] + ".PinParam") for k in range(n)]
+    rest_remap = solve_param_matrix(pp_rest, arc_rest, pin_rest)
     pmin, pmax = rest_remap[0], rest_remap[-1]
 
     # ---- joints: rider param -> live curve param via the remap, then sample both
