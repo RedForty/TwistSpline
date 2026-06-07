@@ -267,7 +267,7 @@ def _add_cv_attrs(ctrl):
 # ---- Stage 1 build --------------------------------------------------------
 
 def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
-                        samples_per_interval=16):
+                        samples_per_interval=16, pins=None):
     """Live curve from CV controls + RMF-oriented joints + per-CV control attrs.
 
     Stage 1+2: position via the live degree-3 curve, orientation via a
@@ -300,6 +300,9 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     cmds.setAttr(cv_ctrls[0] + ".UseTwist", 1.0)
     cmds.setAttr(cv_ctrls[0] + ".UseOrient", 1.0)
     cmds.setAttr(cv_ctrls[-1] + ".UseOrient", 1.0)
+    # Position pins (param-map anchors) requested at build time.
+    for k in (pins or []):
+        cmds.setAttr(cv_ctrls[k] + ".Pin", 1.0)
 
     cv_pos = [_decompose(c) for c in cv_ctrls]
 
