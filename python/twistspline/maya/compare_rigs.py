@@ -139,3 +139,63 @@ def compare_joints(rigs, orient=False, tol=1e-6, verbose=False):
     print("joint parity | max dPos={:.4e} | {}".format(
         max_pos, "OK" if ok else "MISMATCH"))
     return max_pos
+
+
+def compare_native_to_cpp(cv_positions=None, numJoints=10, spread=1.0,
+                          tol_pos=1e-2, tol_rot=0.5, verbose=True):
+    """Direct joint-to-joint parity: the all-native-node rig vs the C++ rig.
+
+    Builds a C++ rig (``makeTwistSpline``) and the native-node rig
+    (``native_builder.build_native_spline``) from identical CV positions, with
+    every CV pinned (so both distribute joints evenly by arc length) and orient
+    locked at CV0 only (the C++ default). Compares each joint's world position and
+    world orientation (relative rotation between world matrices -- convention- and
+    rotate-order-agnostic).
+
+    Only the C++ ``TwistSpline`` plugin is required (no python plugin).
+    """
+    import maya.api.OpenMaya as om
+    from . import native_builder
+
+    if not cmds.pluginInfo("TwistSpline", q=True, loaded=True):
+        cmds.loadPlugin("TwistSpline")
+    if cv_positions is None:
+        cv_positions = [[0, 0, 0], [3, 2, 1], [6, 0, 3], [9, -2, 1], [12, 0, 0]]
+    numCVs = len(cv_positions)
+
+    cppb = _load_cpp_builder()
+    cpp = cppb.makeTwistSpline("cmpCpp", numCVs, numJoints, spread=spread)
+    cpp_d = _unpack(cpp, "cmpCpp", numCVs)
+    # shape the C++ CVs to the test curve and pin every CV (even arc-length spread)
+    for c, p in zip(cpp_d["cvs"], cv_positions):
+        cmds.xform(c, worldSpace=True, translation=list(p))
+        cmds.setAttr(c + ".Pin", 1.0)
+    cmds.dgdirty(allPlugs=True)
+    cmds.refresh(force=True)
+
+    rig = native_builder.build_native_spline(
+        cv_positions, numJoints, spread=spread, name="cmpNative",
+        pins=list(range(numCVs)), orient_cvs=[0])
+    cmds.refresh(force=True)
+
+    max_pos = max_rot = 0.0
+    rows = []
+    for i, (a, b) in enumerate(zip(rig["joints"], cpp_d["joints"])):
+        pa = cmds.xform(a, q=True, ws=True, t=True)
+        pb = cmds.xform(b, q=True, ws=True, t=True)
+        dp = math.sqrt(sum((pa[k] - pb[k]) ** 2 for k in range(3)))
+        ma = om.MMatrix(cmds.xform(a, q=True, ws=True, matrix=True))
+        mb = om.MMatrix(cmds.xform(b, q=True, ws=True, matrix=True))
+        q = om.MTransformationMatrix(ma * mb.inverse()).rotation(asQuaternion=True)
+        dr = math.degrees(2.0 * math.acos(max(-1.0, min(1.0, abs(q[3])))))
+        max_pos = max(max_pos, dp)
+        max_rot = max(max_rot, dr)
+        rows.append((i, dp, dr))
+
+    ok = max_pos < tol_pos and max_rot < tol_rot
+    print("native vs C++ JOINTS | max dPos={:.4e} | max dRot(deg)={:.4f} | {}".format(
+        max_pos, max_rot, "OK" if ok else "REVIEW"))
+    if verbose:
+        for i, dp, dr in rows:
+            print("  joint {:2d}  dPos={:.4e}  dRot={:.4f} deg".format(i, dp, dr))
+    return max_pos, max_rot
