@@ -209,6 +209,24 @@ def _scale1(plug, c, name):
     return n + ".outputX"
 
 
+def _clamp01(plug, name):
+    """clamp(plug, 0, 1) (1D)."""
+    n = cmds.createNode("clamp", name=name)
+    cmds.setAttr(n + ".minR", 0.0)
+    cmds.setAttr(n + ".maxR", 1.0)
+    cmds.connectAttr(plug, n + ".inputR")
+    return n + ".outputR"
+
+
+def _sumN(plugs, name):
+    """Sum of a list of 1D plugs."""
+    n = cmds.createNode("plusMinusAverage", name=name)
+    cmds.setAttr(n + ".operation", 1)
+    for i, p in enumerate(plugs):
+        cmds.connectAttr(p, "{}.input1D[{}]".format(n, i))
+    return n + ".output1D"
+
+
 def _solve_param_remap(name, pin, pp, arc):
     """Native Thomas solve of solveParamMatrix -> a live remap-param plug per CV.
 
@@ -507,16 +525,19 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     pmin, pmax = rest_remap[0], rest_remap[-1]
 
     # ---- joints: rider param -> live curve param via the remap, then sample both
-    # curves there. u_live = seg + (t_j - remap[seg]) / (remap[seg+1] - remap[seg]).
+    # curves there. u_live(t) = sum_k clamp((t-remap[k])/(remap[k+1]-remap[k]),0,1):
+    # monotonic and always in [0,nseg], so joints keep their order and nothing
+    # samples out of range no matter how far the pinned controls are moved.
     joints = []
     for j in range(num_joints):
         t_j = pmin + (pmax - pmin) * j / (num_joints - 1.0) if num_joints > 1 else pmin
-        seg = min(max([k for k in range(nseg) if rest_remap[k] <= t_j + 1e-9],
-                      default=0), nseg - 1)
-        local = _mul1(_sub_cp(t_j, remap[seg], "{}_jln{}".format(name, j)),
-                      _sub1(remap[seg + 1], remap[seg], "{}_jld{}".format(name, j)),
-                      "{}_jlf{}".format(name, j), divide=True)
-        u_live = _add_pc(local, float(seg), "{}_ju{}".format(name, j))
+        terms = []
+        for k in range(nseg):
+            inv = _mul1(_sub_cp(t_j, remap[k], "{}_jin{}_{}".format(name, j, k)),
+                        _sub1(remap[k + 1], remap[k], "{}_jid{}_{}".format(name, j, k)),
+                        "{}_ji{}_{}".format(name, j, k), divide=True)
+            terms.append(_clamp01(inv, "{}_jc{}_{}".format(name, j, k)))
+        u_live = _sumN(terms, "{}_ju{}".format(name, j)) if nseg > 1 else terms[0]
         up_par = _scale1(u_live, float(samples_per_interval), "{}_jus{}".format(name, j))
         jp = _poci_live(curve_shape, u_live, "{}_jp{}".format(name, j))
         jup = _poci_live(up_curve, up_par, "{}_jup{}".format(name, j))
