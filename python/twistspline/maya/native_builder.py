@@ -66,10 +66,10 @@ def _poci(curve_shape, param, name):
 
 def _world_y(ctrl, name):
     """World-space Y axis (up) of a transform as a direction vector plug."""
-    n = cmds.createNode("pointMatrixMult", name=name)
-    cmds.setAttr(n + ".inPoint", 0.0, 1.0, 0.0)
-    cmds.setAttr(n + ".vectorMultiply", 1)
-    cmds.connectAttr(ctrl + ".worldMatrix[0]", n + ".inMatrix")
+    n = cmds.createNode("vectorProduct", name=name)
+    cmds.setAttr(n + ".operation", 3)  # vector-matrix product (ignores translation)
+    cmds.setAttr(n + ".input1", 0.0, 1.0, 0.0)
+    cmds.connectAttr(ctrl + ".worldMatrix[0]", n + ".matrix")
     return n + ".output"
 
 
@@ -105,10 +105,10 @@ def _transport(up_prev, t_prev, t_cur, name):
     cm = cmds.createNode("composeMatrix", name=name + "_cm")
     cmds.setAttr(cm + ".useEulerRotation", 0)
     cmds.connectAttr(aaq + ".outputQuat", cm + ".inputQuat")
-    pmm = cmds.createNode("pointMatrixMult", name=name + "_rot")
-    cmds.setAttr(pmm + ".vectorMultiply", 1)
-    cmds.connectAttr(up_prev, pmm + ".inPoint")
-    cmds.connectAttr(cm + ".outputMatrix", pmm + ".inMatrix")
+    pmm = cmds.createNode("vectorProduct", name=name + "_rot")
+    cmds.setAttr(pmm + ".operation", 3)  # vector-matrix product
+    cmds.connectAttr(up_prev, pmm + ".input1")
+    cmds.connectAttr(cm + ".outputMatrix", pmm + ".matrix")
     return _reproject(pmm + ".output", t_cur, name + "_rp")
 
 
