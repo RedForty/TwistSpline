@@ -222,12 +222,16 @@ def _add_cv_attrs(ctrl):
                  defaultValue=1.0, min=0.0, max=1.0, keyable=True)
     cmds.addAttr(ctrl, longName="UseOrient", attributeType="double",
                  defaultValue=0.0, min=0.0, max=1.0, keyable=True)
+    cmds.addAttr(ctrl, longName="Pin", attributeType="double",
+                 defaultValue=0.0, min=0.0, max=1.0, keyable=True)
+    cmds.addAttr(ctrl, longName="PinParam", attributeType="double",
+                 defaultValue=0.0, keyable=True)
 
 
 # ---- Stage 1 build --------------------------------------------------------
 
 def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
-                        samples_per_interval=8):
+                        samples_per_interval=16):
     """Live curve from CV controls + RMF-oriented joints + per-CV control attrs.
 
     Stage 1+2: position via the live degree-3 curve, orientation via a
@@ -304,25 +308,15 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
         cmds.connectAttr(in_plug[k + 1], "{}.controlPoints[{}]".format(curve_shape, 3 * k + 2))
     cmds.connectAttr(cv_pos[-1], "{}.controlPoints[{}]".format(curve_shape, 3 * nseg))
 
-    # ---- Stage 2: one parallel-transport chain, sampled by curve parameter.
-    # Sample params = joint params UNION CV params (so the RMF is available at
-    # each CV for the useOrient residual), with fill points between consecutive
-    # specials for transport accuracy. All params fixed -> static topology.
-    def _jp(j):
-        return round(j / (num_joints - 1.0) * nseg, 9) if num_joints > 1 else 0.0
-
-    specials = sorted(set([_jp(j) for j in range(num_joints)]
-                          + [float(k) for k in range(nseg + 1)]))
-    sample_params, special_index = [], {}
-    for i, sv in enumerate(specials):
-        special_index[sv] = len(sample_params)
-        sample_params.append(sv)
-        if i < len(specials) - 1:
-            nv = specials[i + 1]
-            for s in range(1, samples_per_interval):
-                sample_params.append(sv + (nv - sv) * s / samples_per_interval)
-    joint_idx = [special_index[_jp(j)] for j in range(num_joints)]
-    cv_idx = [special_index[float(k)] for k in range(nseg + 1)]
+    # ---- RMF transport chain, sampled densely by curve PARAMETER (a CV at each
+    # integer param, plus `samples_per_interval` fill points per segment). Joints
+    # are NOT samples -- they read the upCurve at their own (possibly pinned) param.
+    sample_params = []
+    for k in range(nseg):
+        for s in range(samples_per_interval):
+            sample_params.append(k + s / float(samples_per_interval))
+    sample_params.append(float(nseg))
+    cv_idx = {k: k * samples_per_interval for k in range(nseg + 1)}
 
     pocis = [_poci(curve_shape, p, "{}_poci{}".format(name, i))
              for i, p in enumerate(sample_params)]
@@ -353,39 +347,61 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
         resid = _signed_angle(ups[ci], cup, tans[ci], "{}_res{}".format(name, k))
         orient_val[k] = _mul1(resid, cv_ctrls[k] + ".UseOrient", "{}_oval{}".format(name, k))
 
-    joints = []
-    for j in range(num_joints):
-        idx = joint_idx[j]
-        p_j = sample_params[idx]
-        k = min(int(p_j), nseg - 1)  # bracketing segment / CVs k, k+1
-        arc_j = _alen(curve_shape, p_j, "{}_alenJ{}".format(name, j))
-
-        w = _mul1(_sub1(arc_j, arc_cv[k], "{}_wn{}".format(name, j)),
-                  _sub1(arc_cv[k + 1], arc_cv[k], "{}_wd{}".format(name, j)),
-                  "{}_w{}".format(name, j), divide=True)
-        angle = _lerp1(twist_val[k], twist_val[k + 1], w, "{}_tw{}".format(name, j))
-
+    # ---- Final up per sample = RMF up rotated by (twist + orient) at that sample.
+    final_up = [None] * len(sample_params)
+    for i, p_i in enumerate(sample_params):
+        k = min(int(round(p_i + 1e-9)), nseg - 1)
+        on_cv = abs(p_i - round(p_i)) < 1e-9
+        arc_i = arc_cv[int(round(p_i))] if on_cv else \
+            _alen(curve_shape, p_i, "{}_alenS{}".format(name, i))
+        w = _mul1(_sub1(arc_i, arc_cv[k], "{}_swn{}".format(name, i)),
+                  _sub1(arc_cv[k + 1], arc_cv[k], "{}_swd{}".format(name, i)),
+                  "{}_sw{}".format(name, i), divide=True)
+        angle = _lerp1(twist_val[k], twist_val[k + 1], w, "{}_stw{}".format(name, i))
         if orient_active:
-            lo = max([a for a in orient_active if a <= p_j], default=orient_active[0])
-            hi = min([a for a in orient_active if a >= p_j], default=orient_active[-1])
+            lo = max([a for a in orient_active if a <= p_i], default=orient_active[0])
+            hi = min([a for a in orient_active if a >= p_i], default=orient_active[-1])
             if lo == hi:
                 o_tw = orient_val[lo]
             else:
-                f = _mul1(_sub1(arc_j, arc_cv[lo], "{}_own{}".format(name, j)),
-                          _sub1(arc_cv[hi], arc_cv[lo], "{}_owd{}".format(name, j)),
-                          "{}_ow{}".format(name, j), divide=True)
-                o_tw = _lerp1(orient_val[lo], orient_val[hi], f, "{}_otw{}".format(name, j))
-            angle = _add1(angle, o_tw, "{}_tot{}".format(name, j))
+                f = _mul1(_sub1(arc_i, arc_cv[lo], "{}_sown{}".format(name, i)),
+                          _sub1(arc_cv[hi], arc_cv[lo], "{}_sowd{}".format(name, i)),
+                          "{}_sow{}".format(name, i), divide=True)
+                o_tw = _lerp1(orient_val[lo], orient_val[hi], f, "{}_sotw{}".format(name, i))
+            angle = _add1(angle, o_tw, "{}_stot{}".format(name, i))
+        final_up[i] = _apply_twist(ups[i], tans[i], angle, "{}_satw{}".format(name, i))
 
-        up_tw = _apply_twist(ups[idx], tans[idx], angle, "{}_atw{}".format(name, j))
+    # ---- upCurve: a degree-1 curve whose control points ARE the final up-vectors,
+    # so a joint at any (possibly pinned) param reads its interpolated frame up by
+    # sampling -- the curve itself does the interpolation (no per-joint indexing).
+    up_tfm = cmds.createNode("transform", name=name + "_upCurveT", parent=grp)
+    tmp2 = cmds.curve(degree=1, knot=list(sample_params),
+                      point=[[0.0, float(i), 0.0] for i in range(len(sample_params))])
+    shp2 = cmds.listRelatives(tmp2, shapes=True, fullPath=True)[0]
+    cmds.parent(shp2, up_tfm, shape=True, relative=True)
+    cmds.delete(tmp2)
+    up_curve = cmds.listRelatives(up_tfm, shapes=True)[0]
+    for i in range(len(sample_params)):
+        cmds.connectAttr(final_up[i], "{}.controlPoints[{}]".format(up_curve, i))
+
+    # default PinParam = each CV's curve param (the remap is wired in Stage 5b)
+    for k in range(n):
+        cmds.setAttr(cv_ctrls[k] + ".PinParam", float(k))
+
+    # ---- joints sample BOTH curves at their param (fixed for now; pinned in 5b).
+    joints = []
+    for j in range(num_joints):
+        u_j = j / (num_joints - 1.0) * nseg if num_joints > 1 else 0.0
+        jp = _poci(curve_shape, u_j, "{}_jp{}".format(name, j))
+        jup = _poci(up_curve, u_j, "{}_jup{}".format(name, j))
+        up = _reproject(jup + ".position", jp + ".normalizedTangent", "{}_jrp{}".format(name, j))
         jt = cmds.createNode("joint", name="{}_jnt{}".format(name, j), parent=grp)
-        _build_frame(tans[idx], up_tw, pocis[idx] + ".position", jt,
+        _build_frame(jp + ".normalizedTangent", up, jp + ".position", jt,
                      "{}_frame{}".format(name, j))
         joints.append(jt)
 
     return {"grp": grp, "cv_ctrls": cv_ctrls, "joints": joints,
-            "curve": curve_shape, "nseg": nseg,
-            "sample_params": [sample_params[i] for i in joint_idx]}
+            "curve": curve_shape, "up_curve": up_curve, "nseg": nseg}
 
 
 def verify_frames(rig, spread=3.0):
