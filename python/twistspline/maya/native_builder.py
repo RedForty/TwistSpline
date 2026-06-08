@@ -135,21 +135,28 @@ def _build_tangents(name, grp, cv_ctrls, cv_pos, rest_in, rest_out, start_tensio
     in_a = [None] * n
     man_out = [None] * n
     man_in = [None] * n
+    out_buf = [None] * n
+    in_buf = [None] * n
+    # Each tangent control rides an auto-driven BUFFER (wired to the live auto
+    # handle below), so in Auto mode it tracks the computed tangent as the CVs
+    # move; the control's own translate is the manual offset from there.
     for i in range(n):
         if i < n - 1:
+            buf = cmds.createNode("transform", name="{}_outbuf{}".format(name, i), parent=grp)
             c = cmds.spaceLocator(name="{}_outtan{}".format(name, i))[0]
-            c = cmds.ls(cmds.parent(c, cv_ctrls[i])[0], long=True)[0]
-            cmds.xform(c, worldSpace=True, translation=rest_out[i])
+            c = cmds.ls(cmds.parent(c, buf)[0], long=True)[0]
+            cmds.setAttr(c + ".translate", 0, 0, 0)
             _add_tan_attrs(c)
-            out_ctrl[i] = c
+            out_buf[i], out_ctrl[i] = buf, c
             out_w[i], out_s[i], out_a[i] = c + ".Weight", c + ".Smooth", c + ".Auto"
             man_out[i] = _decompose(c)
         if i > 0:
+            buf = cmds.createNode("transform", name="{}_inbuf{}".format(name, i), parent=grp)
             c = cmds.spaceLocator(name="{}_intan{}".format(name, i))[0]
-            c = cmds.ls(cmds.parent(c, cv_ctrls[i])[0], long=True)[0]
-            cmds.xform(c, worldSpace=True, translation=rest_in[i])
+            c = cmds.ls(cmds.parent(c, buf)[0], long=True)[0]
+            cmds.setAttr(c + ".translate", 0, 0, 0)
             _add_tan_attrs(c)
-            in_ctrl[i] = c
+            in_buf[i], in_ctrl[i] = buf, c
             in_w[i], in_s[i], in_a[i] = c + ".Weight", c + ".Smooth", c + ".Auto"
             man_in[i] = _decompose(c)
 
@@ -226,12 +233,14 @@ def _build_tangents(name, grp, cv_ctrls, cv_pos, rest_in, rest_out, start_tensio
         if i < n - 1:
             auto_vec = _lerp_v(out_linear[i], out_smooth[i], out_s[i], "{}_oav{}".format(name, i))
             auto_h = _add(cv_pos[i], auto_vec, "{}_oah{}".format(name, i))
+            cmds.connectAttr(auto_h, out_buf[i] + ".translate")  # control rides the auto handle
             out_handle[i] = _lerp_v(man_out[i], auto_h, out_a[i], "{}_oh{}".format(name, i))
         if i > 0:
             auto_vec = _lerp_v(in_linear[i], in_smooth[i], in_s[i], "{}_iav{}".format(name, i))
             auto_h = _add(cv_pos[i], auto_vec, "{}_iah{}".format(name, i))
+            cmds.connectAttr(auto_h, in_buf[i] + ".translate")
             in_handle[i] = _lerp_v(man_in[i], auto_h, in_a[i], "{}_ih{}".format(name, i))
-    return out_handle, in_handle, out_ctrl, in_ctrl
+    return out_handle, in_handle, out_ctrl, in_ctrl, out_buf, in_buf
 
 
 # ---- RMF transport node clusters (Stage 2) --------------------------------
@@ -707,7 +716,7 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     # Faithful port of twistMultiTangent: half-angle Catmull-Rom smooth tangents,
     # smooth<->linear blend, manual override, all live. Everything downstream rides
     # the curve, so no other stage changes.
-    out_handle, in_handle, out_ctrl, in_ctrl = _build_tangents(
+    out_handle, in_handle, out_ctrl, in_ctrl, out_buf, in_buf = _build_tangents(
         name, grp, cv_ctrls, cv_pos, rest_in, rest_out)
 
     # Drive every control point from the live CV / tangent-handle plugs.
@@ -854,7 +863,8 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
 
     return {"grp": grp, "cv_ctrls": cv_ctrls, "twist_ctrl": twist_ctrls,
             "joints": joints, "curve": curve_shape, "up_curve": up_curve,
-            "nseg": nseg, "out_ctrl": out_ctrl, "in_ctrl": in_ctrl}
+            "nseg": nseg, "out_ctrl": out_ctrl, "in_ctrl": in_ctrl,
+            "out_buf": out_buf, "in_buf": in_buf}
 
 
 def verify_frames(rig, spread=3.0):
