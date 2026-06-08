@@ -139,3 +139,323 @@ def compare_joints(rigs, orient=False, tol=1e-6, verbose=False):
     print("joint parity | max dPos={:.4e} | {}".format(
         max_pos, "OK" if ok else "MISMATCH"))
     return max_pos
+
+
+def compare_native_to_cpp(cv_positions=None, numJoints=10, spread=1.0,
+                          tol_pos=1e-2, tol_rot=0.5, verbose=True):
+    """Direct joint-to-joint parity: the all-native-node rig vs the C++ rig.
+
+    Builds a C++ rig (``makeTwistSpline``) and the native-node rig
+    (``native_builder.build_native_spline``) from identical CV positions, with
+    every CV pinned (so both distribute joints evenly by arc length) and orient
+    locked at CV0 only (the C++ default). Compares each joint's world position and
+    world orientation (relative rotation between world matrices -- convention- and
+    rotate-order-agnostic).
+
+    Only the C++ ``TwistSpline`` plugin is required (no python plugin).
+    """
+    import maya.api.OpenMaya as om
+    from . import native_builder
+
+    if not cmds.pluginInfo("TwistSpline", q=True, loaded=True):
+        cmds.loadPlugin("TwistSpline")
+    if cv_positions is None:
+        cv_positions = [[0, 0, 0], [3, 2, 1], [6, 0, 3], [9, -2, 1], [12, 0, 0]]
+    numCVs = len(cv_positions)
+
+    cppb = _load_cpp_builder()
+    cpp = cppb.makeTwistSpline("cmpCpp", numCVs, numJoints, spread=spread)
+    cpp_d = _unpack(cpp, "cmpCpp", numCVs)
+    # shape the C++ CVs to the test curve and pin every CV (even arc-length spread)
+    for c, p in zip(cpp_d["cvs"], cv_positions):
+        cmds.xform(c, worldSpace=True, translation=list(p))
+        cmds.setAttr(c + ".Pin", 1.0)
+    cmds.dgdirty(allPlugs=True)
+    cmds.refresh(force=True)
+
+    rig = native_builder.build_native_spline(
+        cv_positions, numJoints, spread=spread, name="cmpNative",
+        pins=list(range(numCVs)), orient_cvs=[0])
+    cmds.refresh(force=True)
+
+    max_pos = max_rot = 0.0
+    rows = []
+    for i, (a, b) in enumerate(zip(rig["joints"], cpp_d["joints"])):
+        pa = cmds.xform(a, q=True, ws=True, t=True)
+        pb = cmds.xform(b, q=True, ws=True, t=True)
+        dp = math.sqrt(sum((pa[k] - pb[k]) ** 2 for k in range(3)))
+        ma = om.MMatrix(cmds.xform(a, q=True, ws=True, matrix=True))
+        mb = om.MMatrix(cmds.xform(b, q=True, ws=True, matrix=True))
+        q = om.MTransformationMatrix(ma * mb.inverse()).rotation(asQuaternion=True)
+        dr = math.degrees(2.0 * math.acos(max(-1.0, min(1.0, abs(q[3])))))
+        max_pos = max(max_pos, dp)
+        max_rot = max(max_rot, dr)
+        rows.append((i, dp, dr))
+
+    ok = max_pos < tol_pos and max_rot < tol_rot
+    print("native vs C++ JOINTS | max dPos={:.4e} | max dRot(deg)={:.4f} | {}".format(
+        max_pos, max_rot, "OK" if ok else "REVIEW"))
+    if verbose:
+        for i, dp, dr in rows:
+            print("  joint {:2d}  dPos={:.4e}  dRot={:.4f} deg".format(i, dp, dr))
+    return max_pos, max_rot
+
+
+def _jdelta(nat_joints, cpp_joints):
+    """Worst (position, orientation-deg) difference between matched joints."""
+    import maya.api.OpenMaya as om
+    mp = mr = 0.0
+    for a, b in zip(nat_joints, cpp_joints):
+        pa = cmds.xform(a, q=True, ws=True, t=True)
+        pb = cmds.xform(b, q=True, ws=True, t=True)
+        mp = max(mp, math.sqrt(sum((pa[k] - pb[k]) ** 2 for k in range(3))))
+        ma = om.MMatrix(cmds.xform(a, q=True, ws=True, matrix=True))
+        mb = om.MMatrix(cmds.xform(b, q=True, ws=True, matrix=True))
+        q = om.MTransformationMatrix(ma * mb.inverse()).rotation(asQuaternion=True)
+        mr = max(mr, math.degrees(2.0 * math.acos(max(-1.0, min(1.0, abs(q[3]))))))
+    return mp, mr
+
+
+def parity_sweep(cv_positions=None, numJoints=10, spread=1.0,
+                 tol_pos=1e-2, tol_rot=0.5):
+    """Drive the native and C++ rigs through matched perturbations and compare.
+
+    Each state sets the SAME change on both rigs (CV moves, Pin, twist, tangent
+    Auto/Smooth/Weight + a manual handle) and reports the worst joint position /
+    orientation difference, so parity is confirmed under animation, not just rest.
+    """
+    from . import native_builder
+    if not cmds.pluginInfo("TwistSpline", q=True, loaded=True):
+        cmds.loadPlugin("TwistSpline")
+    if cv_positions is None:
+        cv_positions = [[0, 0, 0], [3, 2, 1], [6, 0, 3], [9, -2, 1], [12, 0, 0]]
+    n = len(cv_positions)
+
+    cppb = _load_cpp_builder()
+    cpp = cppb.makeTwistSpline("cmpCpp", n, numJoints, spread=spread)
+    cpp_d = _unpack(cpp, "cmpCpp", n)
+    cv_c, o_c, i_c, tw_c = cpp_d["cvs"], cpp_d["oCtrls"], cpp_d["iCtrls"], cpp_d["tws"]
+    for c, p in zip(cv_c, cv_positions):
+        cmds.xform(c, ws=True, t=list(p))
+        cmds.setAttr(c + ".Pin", 1.0)
+    tsn = cmds.ls("cmpCpp*", type="twistSpline")  # neutralize the -1 twist default
+    if tsn:
+        cmds.setAttr(tsn[0] + ".twistMultiplier", 1.0)
+    cmds.refresh(force=True)
+
+    nat = native_builder.build_native_spline(
+        cv_positions, numJoints, spread=spread, name="cmpNat",
+        pins=list(range(n)), orient_cvs=[0])
+    cv_n, o_n, i_n, tw_n = nat["cv_ctrls"], nat["out_ctrl"], nat["in_ctrl"], nat["twist_ctrl"]
+    cmds.refresh(force=True)
+
+    def setboth(np_, cp_, v):
+        cmds.setAttr(np_, v)
+        cmds.setAttr(cp_, v)
+
+    def xboth(nn, cn, p):
+        cmds.xform(nn, ws=True, t=p)
+        cmds.xform(cn, ws=True, t=p)
+
+    results = []
+
+    def check(label):
+        cmds.refresh(force=True)
+        mp, mr = _jdelta(nat["joints"], cpp_d["joints"])
+        flag = "OK" if (mp < tol_pos and mr < tol_rot) else "REVIEW"
+        print("  {:<36} dPos={:.3e}  dRot={:.4f} deg  {}".format(label, mp, mr, flag))
+        results.append((label, mp, mr))
+
+    print("native vs C++ parity sweep:")
+    check("rest")
+
+    # --- twist (rotateX on the per-CV twist controls; all UseTwist=1) ---
+    for k in range(n):
+        setboth(tw_n[k] + ".UseTwist", tw_c[k] + ".UseTwist", 1.0)
+    setboth(tw_n[1] + ".rotateX", tw_c[1] + ".rotateX", 45.0)
+    setboth(tw_n[3] + ".rotateX", tw_c[3] + ".rotateX", -30.0)
+    check("twist CV1=45 CV3=-30 (all pinned)")
+    # partial UseTwist: float CV2 between the twisted neighbours
+    setboth(tw_n[2] + ".UseTwist", tw_c[2] + ".UseTwist", 0.0)
+    check("  + CV2 UseTwist=0 (float)")
+    setboth(tw_n[1] + ".rotateX", tw_c[1] + ".rotateX", 0.0)
+    setboth(tw_n[3] + ".rotateX", tw_c[3] + ".rotateX", 0.0)
+    setboth(tw_n[2] + ".UseTwist", tw_c[2] + ".UseTwist", 1.0)
+
+    # --- geometry ---
+    xboth(cv_n[2], cv_c[2], [6, 3, 4])
+    check("move CV2 -> (6,3,4)")
+    xboth(cv_n[2], cv_c[2], list(cv_positions[2]))
+
+    # --- pin ---
+    setboth(cv_n[2] + ".Pin", cv_c[2] + ".Pin", 0.0)
+    check("unpin CV2 (Pin=0)")
+    setboth(cv_n[2] + ".Pin", cv_c[2] + ".Pin", 1.0)
+
+    # --- tangents (native in_ctrl[i] <-> cpp iCtrls[i-1]) ---
+    setboth(o_n[1] + ".Weight", o_c[1] + ".Weight", 2.2)
+    check("out tangent CV1 Weight=2.2")
+    setboth(o_n[1] + ".Weight", o_c[1] + ".Weight", 1.0)
+
+    setboth(i_n[2] + ".Smooth", i_c[1] + ".Smooth", 0.0)
+    check("in tangent CV2 Smooth=0 (linear)")
+    setboth(i_n[2] + ".Smooth", i_c[1] + ".Smooth", 1.0)
+
+    # --- tangent control MOVES at Auto=1: the spline follows the control's world
+    #     position, so a control offset bends it even in Auto mode (the recovered
+    #     behavior). Set the same WORLD position on both (their local frames differ
+    #     -- the C++ buffer is tangent-oriented -- but the handle follows world).
+    b = cmds.xform(o_n[1], q=True, ws=True, t=True)
+    xboth(o_n[1], o_c[1], [b[0], b[1] + 1.5, b[2]])
+    check("out tangent CV1 moved +1.5Y world (Auto=1)")
+    cmds.setAttr(o_n[1] + ".translate", 0, 0, 0)
+    cmds.setAttr(o_c[1] + ".translate", 0, 0, 0)
+    b = cmds.xform(i_n[2], q=True, ws=True, t=True)
+    xboth(i_n[2], i_c[1], [b[0], b[1], b[2] - 1.0])
+    check("in tangent CV2 moved -1.0Z world (Auto=1)")
+    cmds.setAttr(i_n[2] + ".translate", 0, 0, 0)
+    cmds.setAttr(i_c[1] + ".translate", 0, 0, 0)
+
+    worst_p = max(r[1] for r in results)
+    worst_r = max(r[2] for r in results)
+    print("SWEEP worst | dPos={:.3e} | dRot={:.4f} deg | {}".format(
+        worst_p, worst_r, "OK" if (worst_p < tol_pos and worst_r < tol_rot) else "REVIEW"))
+    return results
+
+
+def parity_suite(cv_positions=None, numJoints=10, spread=1.0,
+                 tol_pos=1e-2, tol_rot=0.8, samples=20):
+    """Systematic native-vs-C++ parity: every control type across a value range,
+    plus combined poses. One state at a time (set both, compare, reset). Reports
+    per-state OK/REVIEW and a pass/fail summary. Needs the C++ TwistSpline plugin.
+    """
+    from . import native_builder
+    if not cmds.pluginInfo("TwistSpline", q=True, loaded=True):
+        cmds.loadPlugin("TwistSpline")
+    if cv_positions is None:
+        cv_positions = [[0, 0, 0], [3, 2, 1], [6, 0, 3], [9, -2, 1], [12, 0, 0]]
+    n = len(cv_positions)
+
+    cppb = _load_cpp_builder()
+    cpp_d = _unpack(cppb.makeTwistSpline("cmpCpp", n, numJoints, spread=spread),
+                    "cmpCpp", n)
+    cv_c, o_c, i_c, tw_c = cpp_d["cvs"], cpp_d["oCtrls"], cpp_d["iCtrls"], cpp_d["tws"]
+    for c, p in zip(cv_c, cv_positions):
+        cmds.xform(c, ws=True, t=list(p))
+        cmds.setAttr(c + ".Pin", 1.0)
+    tsn = cmds.ls("cmpCpp*", type="twistSpline")
+    if tsn:
+        cmds.setAttr(tsn[0] + ".twistMultiplier", 1.0)
+    cmds.refresh(force=True)
+    nat = native_builder.build_native_spline(
+        cv_positions, numJoints, spread=spread, name="cmpNat",
+        pins=list(range(n)), orient_cvs=[0], tan_rest=spread,
+        samples_per_interval=samples)
+    cv_n, o_n, i_n, tw_n = (nat["cv_ctrls"], nat["out_ctrl"], nat["in_ctrl"],
+                            nat["twist_ctrl"])
+    cmds.refresh(force=True)
+
+    results = []
+
+    def setb(a, b, v):
+        cmds.setAttr(a, v)
+        cmds.setAttr(b, v)
+
+    def xb(a, b, p):
+        cmds.xform(a, ws=True, t=p)
+        cmds.xform(b, ws=True, t=p)
+
+    def chk(label):
+        cmds.refresh(force=True)
+        mp, mr = _jdelta(nat["joints"], cpp_d["joints"])
+        ok = mp < tol_pos and mr < tol_rot
+        results.append((label, mp, mr, ok))
+        print("  {:<40} dPos={:.2e} dRot={:.3f} {}".format(
+            label, mp, mr, "OK" if ok else "REVIEW"))
+
+    print("native vs C++ systematic parity suite (tol {:.0e}u / {:.1f}deg):".format(
+        tol_pos, tol_rot))
+    chk("rest")
+
+    # CV translations
+    for i in range(1, n - 1):
+        base = cmds.xform(cv_n[i], q=True, ws=True, t=True)
+        for off in ([2, 0, 0], [0, 3, 0], [0, 0, 2], [-1, 1, -1]):
+            xb(cv_n[i], cv_c[i], [base[k] + off[k] for k in range(3)])
+            chk("CV{} move {}".format(i, off))
+        xb(cv_n[i], cv_c[i], list(base))
+
+    # CV0 orient (rotate the orient-locked anchor)
+    for ax, val in (("rotateX", 40), ("rotateY", 30), ("rotateZ", -25)):
+        setb(cv_n[0] + "." + ax, cv_c[0] + "." + ax, val)
+        chk("CV0 {}={} (orient)".format(ax, val))
+        setb(cv_n[0] + "." + ax, cv_c[0] + "." + ax, 0)
+
+    # twist: each control over a range (all UseTwist=1)
+    for k in range(n):
+        setb(tw_n[k] + ".UseTwist", tw_c[k] + ".UseTwist", 1.0)
+    for i in range(n):
+        for val in (30, -60, 120):
+            setb(tw_n[i] + ".rotateX", tw_c[i] + ".rotateX", val)
+            chk("twist CV{} rotateX={}".format(i, val))
+            setb(tw_n[i] + ".rotateX", tw_c[i] + ".rotateX", 0)
+    # partial / fractional UseTwist (float between pins)
+    setb(tw_n[1] + ".rotateX", tw_c[1] + ".rotateX", 60)
+    setb(tw_n[3] + ".rotateX", tw_c[3] + ".rotateX", -45)
+    for uv in (0.0, 0.5):
+        setb(tw_n[2] + ".UseTwist", tw_c[2] + ".UseTwist", uv)
+        chk("twist float CV2 UseTwist={:.1f}".format(uv))
+    setb(tw_n[2] + ".UseTwist", tw_c[2] + ".UseTwist", 1.0)
+    setb(tw_n[1] + ".rotateX", tw_c[1] + ".rotateX", 0)
+    setb(tw_n[3] + ".rotateX", tw_c[3] + ".rotateX", 0)
+
+    # Pin: each interior CV at 0 and 0.5 (fractional solve)
+    for i in range(1, n - 1):
+        for pv in (0.0, 0.5):
+            setb(cv_n[i] + ".Pin", cv_c[i] + ".Pin", pv)
+            chk("CV{} Pin={:.1f}".format(i, pv))
+        setb(cv_n[i] + ".Pin", cv_c[i] + ".Pin", 1.0)
+
+    # tangents: Weight / Smooth / Auto sweeps + a world move
+    tan_pairs = [("out CV1", o_n[1], o_c[1]), ("in CV2", i_n[2], i_c[1]),
+                 ("out CV2", o_n[2], o_c[2]), ("in CV3", i_n[3], i_c[2])]
+    for label, tn, tc in tan_pairs:
+        for w in (0.4, 2.5):
+            setb(tn + ".Weight", tc + ".Weight", w)
+            chk("{} Weight={:.1f}".format(label, w))
+        setb(tn + ".Weight", tc + ".Weight", 1.0)
+        for s in (0.0, 0.5):
+            setb(tn + ".Smooth", tc + ".Smooth", s)
+            chk("{} Smooth={:.1f}".format(label, s))
+        setb(tn + ".Smooth", tc + ".Smooth", 1.0)
+        for a in (0.5, 0.0):
+            setb(tn + ".Auto", tc + ".Auto", a)
+            chk("{} Auto={:.1f}".format(label, a))
+        setb(tn + ".Auto", tc + ".Auto", 1.0)
+        b = cmds.xform(tn, q=True, ws=True, t=True)
+        xb(tn, tc, [b[0] + 1.0, b[1] + 1.5, b[2] - 0.8])
+        chk("{} moved world (Auto=1)".format(label))
+        cmds.setAttr(tn + ".translate", 0, 0, 0)
+        cmds.setAttr(tc + ".translate", 0, 0, 0)
+
+    # combined pose
+    xb(cv_n[1], cv_c[1], [cv_positions[1][k] + [1, 2, -1][k] for k in range(3)])
+    setb(tw_n[2] + ".rotateX", tw_c[2] + ".rotateX", 50)
+    setb(cv_n[3] + ".Pin", cv_c[3] + ".Pin", 0.0)
+    setb(o_n[2] + ".Weight", o_c[2] + ".Weight", 2.0)
+    chk("combined: CVmove + twist + unpin + weight")
+
+    npass = sum(1 for r in results if r[3])
+    wp = max(r[1] for r in results)
+    wr = max(r[2] for r in results)
+    print("SUITE: {}/{} OK | worst dPos={:.2e} | worst dRot={:.3f} deg".format(
+        npass, len(results), wp, wr))
+    fails = [r for r in results if not r[3]]
+    if fails:
+        kink = [r for r in fails if any(t in r[0] for t in ("Auto=0", "Auto=0.5",
+                "Smooth=0.0", "moved"))]
+        print("  REVIEW: " + ", ".join("{} ({:.2f})".format(r[0], r[2]) for r in fails))
+        if kink and len(kink) == len(fails):
+            print("  (all REVIEW rows are non-G1 'kinked' tangents -- the documented"
+                  " limitation; smooth tangent work is exact. See NATIVE_RIG.md.)")
+    return results
