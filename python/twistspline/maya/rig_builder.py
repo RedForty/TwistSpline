@@ -73,11 +73,30 @@ def build(name, cv_positions=None, num_cvs=None, num_joints=10, rig_type="native
 
     if rt in _NATIVE:
         from . import native_builder
+        from . import builder as _b
+        # The SHARED production control rig (plugin-free -- the same controls the
+        # cpp/python backends use). The native node graph wires onto it, so control
+        # improvements are inherited by all three backends.
+        (cvs, cvBfrs, oBfrs, iBfrs, oRests, iRests, oCtrls, iCtrls,
+         tws, twBfrs, master) = _b.mkTwistSplineControllers(
+            name, num_cvs, spread, closed=closed, singleTangentNode=True)
+        for c, p in zip(cvs, cv_positions):              # shape the hull
+            cmds.xform(c, worldSpace=True, translation=list(p))
+            cmds.setAttr(c + ".translate", lock=False)
+        for c in cvs:                                    # native uses UseOrient
+            if not cmds.attributeQuery("UseOrient", node=c, exists=True):
+                cmds.addAttr(c, longName="UseOrient", attributeType="double",
+                             defaultValue=0.0, min=0.0, max=1.0, keyable=True)
+        grp = cmds.createNode("transform", name=name + "_nativeGrp")
+        if master and cmds.objExists(master):
+            grp = cmds.parent(grp, master)[0]
+        controls = native_builder.adapt_shared_controls(
+            grp, cvs, tws, oCtrls, iCtrls, oBfrs, iBfrs, oRests, iRests)
         rig = native_builder.build_native_spline(
-            cv_positions, num_joints, spread=spread, name=name)
+            cv_positions, num_joints, spread=spread, name=name, controls=controls)
         rig["rig_type"] = "native"
-        rig.setdefault("master", None)
-        rig.setdefault("group", rig.get("grp"))
+        rig["master"] = master
+        rig.setdefault("group", grp)
         return rig
 
     if rt in _PYTHON:
