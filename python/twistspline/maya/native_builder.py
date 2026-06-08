@@ -964,3 +964,89 @@ def verify_tangents(rig):
     print("native tangents vs reference | max dHandle={:.3e} | {}".format(
         maxd, "OK" if ok else "REVIEW"))
     return maxd
+
+
+# ---- cosmetic finalize (animator-facing; math/parity untouched) -----------
+
+def _cube_pts(s):
+    return [[-s, -s, -s], [s, -s, -s], [s, s, -s], [-s, s, -s], [-s, -s, -s],
+            [-s, -s, s], [s, -s, s], [s, s, s], [-s, s, s], [-s, -s, s],
+            [s, -s, s], [s, -s, -s], [s, s, -s], [s, s, s], [-s, s, s], [-s, s, -s]]
+
+
+def _ctrl_shape(transform, kind, size, color):
+    """Swap a control's locator shape for a colored NURBS curve shape."""
+    old = cmds.listRelatives(transform, shapes=True, fullPath=True) or []
+    if kind == "cube":
+        tmp = cmds.curve(degree=1, point=_cube_pts(size))
+    else:  # circleX / circleY / circleZ
+        nrm = {"circleX": [1, 0, 0], "circleY": [0, 1, 0],
+               "circleZ": [0, 0, 1]}.get(kind, [1, 0, 0])
+        tmp = cmds.circle(normal=nrm, radius=size, constructionHistory=False)[0]
+    for s in cmds.listRelatives(tmp, shapes=True, fullPath=True) or []:
+        cmds.setAttr(s + ".overrideEnabled", 1)
+        cmds.setAttr(s + ".overrideColor", color)
+        cmds.parent(s, transform, shape=True, relative=True)
+    cmds.delete(tmp)
+    for s in old:
+        cmds.delete(s)
+
+
+def _lock_hide(node, attrs):
+    for a in attrs:
+        try:
+            cmds.setAttr(node + "." + a, lock=True, keyable=False, channelBox=False)
+        except Exception:
+            pass
+
+
+def finalize_rig(rig):
+    """Make a built rig animator-friendly: colored NURBS control shapes, internal
+    guts hidden (upCurve + arcLengthDimension nodes), non-animatable channels
+    locked/hidden, and a selection set of the controls. Purely cosmetic -- the
+    node math and C++ parity are unaffected. Call after build_native_spline.
+    """
+    grp = rig["grp"]
+    name = grp.rsplit("|", 1)[-1]
+    if name.endswith("_grp"):
+        name = name[:-4]
+
+    # hidden 'guts' group for the internal display geometry
+    guts = cmds.createNode("transform", name=name + "_guts", parent=grp)
+    cmds.setAttr(guts + ".visibility", 0)
+    upT = cmds.listRelatives(rig["up_curve"], parent=True, fullPath=True) or []
+    for t in upT:
+        cmds.parent(t, guts)
+    for s in set(cmds.listConnections(rig["curve"] + ".worldSpace[0]",
+                                      type="arcLengthDimension") or []):
+        for t in cmds.listRelatives(s, parent=True, fullPath=True) or []:
+            cmds.parent(t, guts)
+
+    # colored shapes: CV=yellow circle, twist=red dial (around X), tangents=cubes
+    for c in rig["cv_ctrls"]:
+        _ctrl_shape(c, "circleX", 1.0, 17)
+    for c in rig["twist_ctrl"]:
+        _ctrl_shape(c, "circleX", 0.6, 13)
+    for c in rig["out_ctrl"]:
+        if c:
+            _ctrl_shape(c, "cube", 0.28, 6)
+    for c in rig["in_ctrl"]:
+        if c:
+            _ctrl_shape(c, "cube", 0.28, 18)
+
+    # channel cleanup (keep only the animatable channels + custom attrs)
+    for c in rig["cv_ctrls"]:
+        _lock_hide(c, ["sx", "sy", "sz", "v"])
+    for c in rig["twist_ctrl"]:
+        _lock_hide(c, ["tx", "ty", "tz", "ry", "rz", "sx", "sy", "sz", "v"])
+    for c in rig["out_ctrl"] + rig["in_ctrl"]:
+        if c:
+            _lock_hide(c, ["rx", "ry", "rz", "sx", "sy", "sz", "v"])
+    for j in rig["joints"]:
+        _lock_hide(j, ["tx", "ty", "tz", "rx", "ry", "rz", "sx", "sy", "sz", "v"])
+
+    anim = (rig["cv_ctrls"] + rig["twist_ctrl"]
+            + [c for c in rig["out_ctrl"] + rig["in_ctrl"] if c])
+    rig["set"] = cmds.sets(anim, name=name + "_controls")
+    rig["guts"] = guts
+    return rig
