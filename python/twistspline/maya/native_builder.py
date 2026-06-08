@@ -536,8 +536,11 @@ def _solve_twist_param(name, lock, val, arc):
     sub = [None] * n
     sup = [None] * n
     res = [None] * n
+    # RHS is -(UseTwist*Twist): the kernel's solve returns the NEGATED twist (a
+    # pinned CV holds -Twist) and flips it back downstream; negating the RHS makes
+    # this solve hold +Twist directly, matching the native _apply_twist convention.
     sup[0] = oml[0]
-    res[0] = _mul1(lock[0], val[0], name + "_res0")
+    res[0] = _scale1(_mul1(lock[0], val[0], name + "_rm0"), -1.0, name + "_res0")
     for i in range(1, n - 1):
         A = _mul1(_sub1(arc[i], arc[i - 1], "{}_An{}".format(name, i)),
                   _sub1(arc[i + 1], arc[i - 1], "{}_Ad{}".format(name, i)),
@@ -545,10 +548,11 @@ def _solve_twist_param(name, lock, val, arc):
         sub[i] = _mul1(oml[i], _sub_cp(1.0, A, "{}_omA{}".format(name, i)),
                        "{}_sub{}".format(name, i))
         sup[i] = _mul1(oml[i], A, "{}_sup{}".format(name, i))
-        res[i] = _mul1(lock[i], val[i], "{}_res{}".format(name, i))
+        res[i] = _scale1(_mul1(lock[i], val[i], "{}_rm{}".format(name, i)), -1.0,
+                         "{}_res{}".format(name, i))
     e = n - 1
     sub[e] = oml[e]
-    res[e] = _mul1(lock[e], val[e], name + "_rese")
+    res[e] = _scale1(_mul1(lock[e], val[e], name + "_rme"), -1.0, name + "_rese")
     c = [None] * n
     d = [None] * n
     c[0] = _scale1(sup[0], -1.0, name + "_c0")
