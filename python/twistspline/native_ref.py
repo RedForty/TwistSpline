@@ -107,16 +107,13 @@ def native_frames(cv_positions, joint_params, cv_quats=None, twist_vals=None,
     for i in range(num_segs):
         cv_arclen[i + 1] = cv_arclen[i] + spline.segments[i].get_length()
 
-    # Forward parallel-transport RMF, sampled uniformly in param.
+    # RMF base = the spline's own double-reflection normals (the method the C++
+    # kernel uses); we only sample arc length here for the twist/orient distribution.
     npts = samples_per_seg * num_segs
     sp = [lo + (hi - lo) * i / npts for i in range(npts + 1)]
-    tans = [tan_at(p) for p in sp]
     pts = [pos_at(p) for p in sp]
-    anchor = _reproject(vm.rotate_by_quat([0.0, 1.0, 0.0], cv_quats[0]), tans[0])
-    table = [anchor]
     arc = [0.0]
     for i in range(1, len(sp)):
-        table.append(_transport(table[-1], tans[i - 1], tans[i]))
         arc.append(arc[-1] + vm.length(vm.sub(pts[i], pts[i - 1])))
 
     def _bracket(p):
@@ -127,9 +124,7 @@ def native_frames(cv_positions, joint_params, cv_quats=None, twist_vals=None,
         return len(sp) - 2, 1.0
 
     def rmf_at(p):
-        i, f = _bracket(p)
-        n_ = vm.add(vm.scale(table[i], 1.0 - f), vm.scale(table[i + 1], f))
-        return _reproject(n_, tan_at(p))
+        return spline.matrix_at_param(p, twisted=False).norm
 
     def arclen_at(p):
         i, f = _bracket(p)

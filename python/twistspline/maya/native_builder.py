@@ -321,6 +321,45 @@ def _transport(up_prev, t_prev, t_cur, name):
     return _reproject(pmm + ".output", t_cur, name + "_rp")
 
 
+def _dot(a, b, name):
+    """Dot product of two 3-vector plugs (scalar)."""
+    n = cmds.createNode("vectorProduct", name=name)
+    cmds.setAttr(n + ".operation", 1)  # dot
+    cmds.connectAttr(a, n + ".input1")
+    cmds.connectAttr(b, n + ".input2")
+    return n + ".outputX"
+
+
+def _const_div(num, denom_plug, name):
+    """const / plug (1D)."""
+    n = cmds.createNode("multiplyDivide", name=name)
+    cmds.setAttr(n + ".operation", 2)  # divide
+    cmds.setAttr(n + ".input1X", num)
+    cmds.connectAttr(denom_plug, n + ".input2X")
+    return n + ".outputX"
+
+
+def _double_reflect(up, p0, p1, t0, t1, name):
+    """One double-reflection RMF step (Wang et al.), the method the C++ kernel
+    uses. Reflects the frame across the bisecting plane of the two sample points,
+    then across the plane that maps t0 onto t1 -- a more stable transport than the
+    angleBetween rotation, and the one needed to match the C++ rig exactly.
+    """
+    v1 = _sub(p1, p0, name + "_v1")
+    c1 = _const_div(2.0, _dot(v1, v1, name + "_d11"), name + "_c1")  # 2/|v1|^2
+    # reflect tangent: t_li = t0 - v1 * (c1 * dot(v1, t0))
+    t_li = _sub(t0, _scale_vp(v1, _mul1(c1, _dot(v1, t0, name + "_dvt"), name + "_c1t"),
+                              name + "_v1t"), name + "_tli")
+    v2 = _sub(t1, t_li, name + "_v2")
+    c2 = _const_div(2.0, _dot(v2, v2, name + "_d22"), name + "_c2")
+    # reflect normal twice: r_li = up - v1*(c1*dot(v1,up)); up1 = r_li - v2*(c2*dot(v2,r_li))
+    r_li = _sub(up, _scale_vp(v1, _mul1(c1, _dot(v1, up, name + "_dvu"), name + "_c1u"),
+                              name + "_v1u"), name + "_rli")
+    up1 = _sub(r_li, _scale_vp(v2, _mul1(c2, _dot(v2, r_li, name + "_dvr"), name + "_c2r"),
+                               name + "_v2r"), name + "_up1")
+    return _reproject(up1, t1, name + "_rp")
+
+
 def _build_frame(tan, up, pos, joint, name):
     """rows X=tan, Y=up, Z=cross(tan,up); translation=pos -> drive joint.
 
@@ -637,7 +676,8 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     ups = [None] * len(pocis)
     ups[0] = _reproject(_world_y(cv_ctrls[0], name + "_anchorY"), tans[0], name + "_anchor")
     for i in range(1, len(pocis)):
-        ups[i] = _transport(ups[i - 1], tans[i - 1], tans[i], "{}_tr{}".format(name, i))
+        ups[i] = _double_reflect(ups[i - 1], pocis[i - 1] + ".position", pocis[i] + ".position",
+                                 tans[i - 1], tans[i], "{}_dr{}".format(name, i))
 
     # Stage 3: per-CV twist. Every CV is a twist knot (value = Twist * UseTwist),
     # interpolated piecewise-linearly by *live* arc length between consecutive CVs.
