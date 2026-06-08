@@ -452,5 +452,10 @@ def parity_suite(cv_positions=None, numJoints=10, spread=1.0,
         npass, len(results), wp, wr))
     fails = [r for r in results if not r[3]]
     if fails:
+        kink = [r for r in fails if any(t in r[0] for t in ("Auto=0", "Auto=0.5",
+                "Smooth=0.0", "moved"))]
         print("  REVIEW: " + ", ".join("{} ({:.2f})".format(r[0], r[2]) for r in fails))
+        if kink and len(kink) == len(fails):
+            print("  (all REVIEW rows are non-G1 'kinked' tangents -- the documented"
+                  " limitation; smooth tangent work is exact. See NATIVE_RIG.md.)")
     return results
