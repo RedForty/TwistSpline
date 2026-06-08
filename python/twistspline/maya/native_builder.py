@@ -91,6 +91,15 @@ def _add_vc(plug, const_vec, name):
     return n + ".output3D"
 
 
+def _point_mat(vec_const, matrix_plug, name):
+    """Transform a constant point by a matrix plug (incl. translation)."""
+    n = cmds.createNode("vectorProduct", name=name)
+    cmds.setAttr(n + ".operation", 4)  # point-matrix product
+    cmds.setAttr(n + ".input1", *vec_const)
+    cmds.connectAttr(matrix_plug, n + ".matrix")
+    return n + ".output"
+
+
 def _scale_vp(a, s_plug, name):
     """Scale a 3-vector plug by a scalar plug."""
     n = cmds.createNode("multiplyDivide", name=name)
@@ -124,7 +133,8 @@ def _add_tan_attrs(ctrl):
                  defaultValue=1.0, min=0.0, max=3.0, keyable=True)
 
 
-def _build_tangents(name, grp, cv_ctrls, cv_pos, cvs, rest_in, rest_out, start_tension=2.0):
+def _build_tangents(name, grp, cv_ctrls, cv_pos, cvs, rest_in, rest_out,
+                    start_tension=2.0, tan_rest=1.0):
     """Native port of twistMultiTangent handle positions (open spline).
 
     Creates per-CV in/out tangent controls (children of the CV control) carrying
@@ -244,22 +254,25 @@ def _build_tangents(name, grp, cv_ctrls, cv_pos, cvs, rest_in, rest_out, start_t
     # (even at Auto=1). rest offsets follow the CV (added to its live position).
     rest_off_out = [None] * n
     rest_off_in = [None] * n
+    # The rest reference (Auto=0 target) is a straight +/- tan_rest along the CV's
+    # local X, exactly like the C++ rig's rest buffer -- so Auto blends the buffer
+    # between that straight rest and the live auto tangent.
     for i in range(n):
         if i < n - 1:
             auto_vec = _lerp_v(out_linear[i], out_smooth[i], out_s[i], "{}_oav{}".format(name, i))
             auto_h = _add(cv_pos[i], auto_vec, "{}_oah{}".format(name, i))
-            off = [rest_out[i][k] - cvs[i][k] for k in range(3)]
-            rest_off_out[i] = off
-            rest_h = _add_vc(cv_pos[i], off, "{}_orh{}".format(name, i))
+            rest_off_out[i] = [tan_rest, 0.0, 0.0]
+            rest_h = _point_mat([tan_rest, 0.0, 0.0], cv_ctrls[i] + ".worldMatrix[0]",
+                                "{}_orh{}".format(name, i))
             buf = _lerp_v(rest_h, auto_h, out_a[i], "{}_obp{}".format(name, i))
             cmds.connectAttr(buf, out_buf[i] + ".translate")
             out_handle[i] = man_out[i]   # spline follows the control's world position
         if i > 0:
             auto_vec = _lerp_v(in_linear[i], in_smooth[i], in_s[i], "{}_iav{}".format(name, i))
             auto_h = _add(cv_pos[i], auto_vec, "{}_iah{}".format(name, i))
-            off = [rest_in[i][k] - cvs[i][k] for k in range(3)]
-            rest_off_in[i] = off
-            rest_h = _add_vc(cv_pos[i], off, "{}_irh{}".format(name, i))
+            rest_off_in[i] = [-tan_rest, 0.0, 0.0]
+            rest_h = _point_mat([-tan_rest, 0.0, 0.0], cv_ctrls[i] + ".worldMatrix[0]",
+                                "{}_irh{}".format(name, i))
             buf = _lerp_v(rest_h, auto_h, in_a[i], "{}_ibp{}".format(name, i))
             cmds.connectAttr(buf, in_buf[i] + ".translate")
             in_handle[i] = man_in[i]
@@ -666,7 +679,8 @@ def _add_twist_attrs(ctrl):
 # ---- Stage 1 build --------------------------------------------------------
 
 def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
-                        samples_per_interval=20, pins=None, orient_cvs=None):
+                        samples_per_interval=20, pins=None, orient_cvs=None,
+                        tan_rest=None):
     """Live curve from CV controls + RMF-oriented joints + per-CV control attrs.
 
     Stage 1+2: position via the live degree-3 curve, orientation via a
@@ -742,7 +756,8 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     # the curve, so no other stage changes.
     (out_handle, in_handle, out_ctrl, in_ctrl, out_buf, in_buf,
      rest_off_out, rest_off_in) = _build_tangents(
-        name, grp, cv_ctrls, cv_pos, cvs, rest_in, rest_out)
+        name, grp, cv_ctrls, cv_pos, cvs, rest_in, rest_out,
+        tan_rest=(spread if tan_rest is None else tan_rest))
 
     # Drive every control point from the live CV / tangent-handle plugs.
     for k in range(nseg):
