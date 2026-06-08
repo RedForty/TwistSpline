@@ -246,7 +246,7 @@ def parity_sweep(cv_positions=None, numJoints=10, spread=1.0,
     nat = native_builder.build_native_spline(
         cv_positions, numJoints, spread=spread, name="cmpNat",
         pins=list(range(n)), orient_cvs=[0])
-    cv_n, o_n, i_n = nat["cv_ctrls"], nat["out_ctrl"], nat["in_ctrl"]
+    cv_n, o_n, i_n, tw_n = nat["cv_ctrls"], nat["out_ctrl"], nat["in_ctrl"], nat["twist_ctrl"]
     cmds.refresh(force=True)
 
     def setboth(np_, cp_, v):
@@ -269,18 +269,18 @@ def parity_sweep(cv_positions=None, numJoints=10, spread=1.0,
     print("native vs C++ parity sweep:")
     check("rest")
 
-    # --- twist (all UseTwist=1 so every CV is a twist knot on both sides) ---
+    # --- twist (rotateX on the per-CV twist controls; all UseTwist=1) ---
     for k in range(n):
-        setboth(cv_n[k] + ".UseTwist", tw_c[k] + ".UseTwist", 1.0)
-    setboth(cv_n[1] + ".Twist", tw_c[1] + ".rotateX", 45.0)
-    setboth(cv_n[3] + ".Twist", tw_c[3] + ".rotateX", -30.0)
+        setboth(tw_n[k] + ".UseTwist", tw_c[k] + ".UseTwist", 1.0)
+    setboth(tw_n[1] + ".rotateX", tw_c[1] + ".rotateX", 45.0)
+    setboth(tw_n[3] + ".rotateX", tw_c[3] + ".rotateX", -30.0)
     check("twist CV1=45 CV3=-30 (all pinned)")
     # partial UseTwist: float CV2 between the twisted neighbours
-    setboth(cv_n[2] + ".UseTwist", tw_c[2] + ".UseTwist", 0.0)
+    setboth(tw_n[2] + ".UseTwist", tw_c[2] + ".UseTwist", 0.0)
     check("  + CV2 UseTwist=0 (float)")
-    setboth(cv_n[1] + ".Twist", tw_c[1] + ".rotateX", 0.0)
-    setboth(cv_n[3] + ".Twist", tw_c[3] + ".rotateX", 0.0)
-    setboth(cv_n[2] + ".UseTwist", tw_c[2] + ".UseTwist", 1.0)
+    setboth(tw_n[1] + ".rotateX", tw_c[1] + ".rotateX", 0.0)
+    setboth(tw_n[3] + ".rotateX", tw_c[3] + ".rotateX", 0.0)
+    setboth(tw_n[2] + ".UseTwist", tw_c[2] + ".UseTwist", 1.0)
 
     # --- geometry ---
     xboth(cv_n[2], cv_c[2], [6, 3, 4])

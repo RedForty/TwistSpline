@@ -616,16 +616,18 @@ def _apply_twist(up, tan, angle, name):
 # ---- control attributes ---------------------------------------------------
 
 def _add_cv_attrs(ctrl):
-    cmds.addAttr(ctrl, longName="Twist", attributeType="doubleAngle",
-                 defaultValue=0.0, keyable=True)
-    cmds.addAttr(ctrl, longName="UseTwist", attributeType="double",
-                 defaultValue=1.0, min=0.0, max=1.0, keyable=True)
     cmds.addAttr(ctrl, longName="UseOrient", attributeType="double",
                  defaultValue=0.0, min=0.0, max=1.0, keyable=True)
     cmds.addAttr(ctrl, longName="Pin", attributeType="double",
                  defaultValue=0.0, min=0.0, max=1.0, keyable=True)
     cmds.addAttr(ctrl, longName="PinParam", attributeType="double",
                  defaultValue=0.0, keyable=True)
+
+
+def _add_twist_attrs(ctrl):
+    """Per-CV twist control: rotateX injects twist; UseTwist is its lock weight."""
+    cmds.addAttr(ctrl, longName="UseTwist", attributeType="double",
+                 defaultValue=1.0, min=0.0, max=1.0, keyable=True)
 
 
 # ---- Stage 1 build --------------------------------------------------------
@@ -653,8 +655,10 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     grp = cmds.createNode("transform", name=name + "_grp")
     curve_tfm = cmds.createNode("transform", name=name + "_curve", parent=grp)
 
-    # CV control transforms with the per-CV attributes.
+    # CV control transforms with the per-CV attributes, each with a child Twist
+    # control (its rotateX injects twist at that CV, like the real rig).
     cv_ctrls = []
+    twist_ctrls = []
     for i in range(n):
         c = cmds.spaceLocator(name="{}_cv{}".format(name, i))[0]
         # full DAG path so a same-named rebuild in one scene stays unambiguous
@@ -662,9 +666,14 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
         cmds.xform(c, worldSpace=True, translation=cvs[i])
         _add_cv_attrs(c)
         cv_ctrls.append(c)
+        tw = cmds.spaceLocator(name="{}_cv{}_twist".format(name, i))[0]
+        tw = cmds.ls(cmds.parent(tw, c)[0], long=True)[0]
+        cmds.setAttr(tw + ".translate", 0, 0, 0)
+        _add_twist_attrs(tw)
+        twist_ctrls.append(tw)
     # Default pin pattern (matches the real rig): twist@CV0, orient@first+last,
     # and the endpoints anchor the param range (Pin is now a live 0..1 blend).
-    cmds.setAttr(cv_ctrls[0] + ".UseTwist", 1.0)
+    cmds.setAttr(twist_ctrls[0] + ".UseTwist", 1.0)
     # orient-locked CVs (default first+last; pass orient_cvs=[0] to match the C++
     # builder's CV0-only default for parity).
     for k in (orient_cvs if orient_cvs is not None else [0, n - 1]):
@@ -735,8 +744,8 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     arc_cv = [_alen(curve_shape, float(k), "{}_alenCV{}".format(name, k))
               for k in range(nseg + 1)]
     twist_val = _solve_twist_param(name + "_tw",
-                                   [cv_ctrls[k] + ".UseTwist" for k in range(n)],
-                                   [cv_ctrls[k] + ".Twist" for k in range(n)], arc_cv)
+                                   [twist_ctrls[k] + ".UseTwist" for k in range(n)],
+                                   [twist_ctrls[k] + ".rotateX" for k in range(n)], arc_cv)
 
     # Stage 4: useOrient. Residual at each orient-pinned CV (angle between the RMF
     # and the control's up, around the tangent) * UseOrient, distributed linearly
@@ -843,9 +852,9 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
                      "{}_frame{}".format(name, j))
         joints.append(jt)
 
-    return {"grp": grp, "cv_ctrls": cv_ctrls, "joints": joints,
-            "curve": curve_shape, "up_curve": up_curve, "nseg": nseg,
-            "out_ctrl": out_ctrl, "in_ctrl": in_ctrl}
+    return {"grp": grp, "cv_ctrls": cv_ctrls, "twist_ctrl": twist_ctrls,
+            "joints": joints, "curve": curve_shape, "up_curve": up_curve,
+            "nseg": nseg, "out_ctrl": out_ctrl, "in_ctrl": in_ctrl}
 
 
 def verify_frames(rig, spread=3.0):
@@ -857,9 +866,10 @@ def verify_frames(rig, spread=3.0):
     import maya.api.OpenMaya as om
     cv_pos = [cmds.xform(c, q=True, ws=True, t=True) for c in rig["cv_ctrls"]]
     n = len(rig["cv_ctrls"])
-    twist_vals = [math.radians(cmds.getAttr(c + ".Twist"))  # doubleAngle -> degrees
-                  * cmds.getAttr(c + ".UseTwist") for c in rig["cv_ctrls"]]
-    twist_locks = [1.0] * n
+    # raw twist (rotateX) as values, UseTwist as the lock weights -> native_ref
+    # floats unpinned CVs between twist pins, matching the rig's twist solve.
+    twist_vals = [math.radians(cmds.getAttr(tc + ".rotateX")) for tc in rig["twist_ctrl"]]
+    twist_locks = [cmds.getAttr(tc + ".UseTwist") for tc in rig["twist_ctrl"]]
 
     cv_quats, orient_locks = [], []
     for c in rig["cv_ctrls"]:
