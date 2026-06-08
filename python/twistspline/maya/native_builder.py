@@ -666,7 +666,7 @@ def _add_twist_attrs(ctrl):
 # ---- Stage 1 build --------------------------------------------------------
 
 def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
-                        samples_per_interval=16, pins=None, orient_cvs=None):
+                        samples_per_interval=20, pins=None, orient_cvs=None):
     """Live curve from CV controls + RMF-oriented joints + per-CV control attrs.
 
     Stage 1+2: position via the live degree-3 curve, orientation via a
