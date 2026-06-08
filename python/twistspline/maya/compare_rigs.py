@@ -303,14 +303,18 @@ def parity_sweep(cv_positions=None, numJoints=10, spread=1.0,
 
     # --- tangent control MOVES at Auto=1: the spline follows the control's world
     #     position, so a control offset bends it even in Auto mode (the recovered
-    #     behavior). Both buffers sit on the live auto handle, so an identical local
-    #     offset gives the same handle.
-    setboth(o_n[1] + ".translateY", o_c[1] + ".translateY", 1.5)
-    check("out tangent CV1 moved +1.5Y (Auto=1)")
-    setboth(o_n[1] + ".translateY", o_c[1] + ".translateY", 0.0)
-    setboth(i_n[2] + ".translateZ", i_c[1] + ".translateZ", -1.0)
-    check("in tangent CV2 moved -1.0Z (Auto=1)")
-    setboth(i_n[2] + ".translateZ", i_c[1] + ".translateZ", 0.0)
+    #     behavior). Set the same WORLD position on both (their local frames differ
+    #     -- the C++ buffer is tangent-oriented -- but the handle follows world).
+    b = cmds.xform(o_n[1], q=True, ws=True, t=True)
+    xboth(o_n[1], o_c[1], [b[0], b[1] + 1.5, b[2]])
+    check("out tangent CV1 moved +1.5Y world (Auto=1)")
+    cmds.setAttr(o_n[1] + ".translate", 0, 0, 0)
+    cmds.setAttr(o_c[1] + ".translate", 0, 0, 0)
+    b = cmds.xform(i_n[2], q=True, ws=True, t=True)
+    xboth(i_n[2], i_c[1], [b[0], b[1], b[2] - 1.0])
+    check("in tangent CV2 moved -1.0Z world (Auto=1)")
+    cmds.setAttr(i_n[2] + ".translate", 0, 0, 0)
+    cmds.setAttr(i_c[1] + ".translate", 0, 0, 0)
 
     worst_p = max(r[1] for r in results)
     worst_r = max(r[2] for r in results)
