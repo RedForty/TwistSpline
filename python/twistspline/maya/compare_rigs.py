@@ -324,7 +324,7 @@ def parity_sweep(cv_positions=None, numJoints=10, spread=1.0,
 
 
 def parity_suite(cv_positions=None, numJoints=10, spread=1.0,
-                 tol_pos=1e-2, tol_rot=0.8):
+                 tol_pos=1e-2, tol_rot=0.8, samples=20):
     """Systematic native-vs-C++ parity: every control type across a value range,
     plus combined poses. One state at a time (set both, compare, reset). Reports
     per-state OK/REVIEW and a pass/fail summary. Needs the C++ TwistSpline plugin.
@@ -349,7 +349,8 @@ def parity_suite(cv_positions=None, numJoints=10, spread=1.0,
     cmds.refresh(force=True)
     nat = native_builder.build_native_spline(
         cv_positions, numJoints, spread=spread, name="cmpNat",
-        pins=list(range(n)), orient_cvs=[0], tan_rest=spread)
+        pins=list(range(n)), orient_cvs=[0], tan_rest=spread,
+        samples_per_interval=samples)
     cv_n, o_n, i_n, tw_n = (nat["cv_ctrls"], nat["out_ctrl"], nat["in_ctrl"],
                             nat["twist_ctrl"])
     cmds.refresh(force=True)
