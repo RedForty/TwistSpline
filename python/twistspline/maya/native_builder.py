@@ -82,6 +82,15 @@ def _len_v(a, name):
     return n + ".distance"
 
 
+def _add_vc(plug, const_vec, name):
+    """3-vector plug + a constant vector."""
+    n = cmds.createNode("plusMinusAverage", name=name)
+    cmds.setAttr(n + ".operation", 1)  # sum
+    cmds.connectAttr(plug, n + ".input3D[0]")
+    cmds.setAttr(n + ".input3D[1]", *const_vec, type="double3")
+    return n + ".output3D"
+
+
 def _scale_vp(a, s_plug, name):
     """Scale a 3-vector plug by a scalar plug."""
     n = cmds.createNode("multiplyDivide", name=name)
@@ -115,7 +124,7 @@ def _add_tan_attrs(ctrl):
                  defaultValue=1.0, min=0.0, max=3.0, keyable=True)
 
 
-def _build_tangents(name, grp, cv_ctrls, cv_pos, rest_in, rest_out, start_tension=2.0):
+def _build_tangents(name, grp, cv_ctrls, cv_pos, cvs, rest_in, rest_out, start_tension=2.0):
     """Native port of twistMultiTangent handle positions (open spline).
 
     Creates per-CV in/out tangent controls (children of the CV control) carrying
@@ -229,18 +238,33 @@ def _build_tangents(name, grp, cv_ctrls, cv_pos, rest_in, rest_out, start_tensio
     # blend smooth<->linear (Smooth) then auto<->manual (Auto), add to CV
     out_handle = [None] * n
     in_handle = [None] * n
+    # Like the real rig: the buffer the control rides blends between the live auto
+    # handle (Auto=1) and a frozen REST handle (Auto=0); the spline reads the
+    # CONTROL's world position, so the control's own offset always bends the spline
+    # (even at Auto=1). rest offsets follow the CV (added to its live position).
+    rest_off_out = [None] * n
+    rest_off_in = [None] * n
     for i in range(n):
         if i < n - 1:
             auto_vec = _lerp_v(out_linear[i], out_smooth[i], out_s[i], "{}_oav{}".format(name, i))
             auto_h = _add(cv_pos[i], auto_vec, "{}_oah{}".format(name, i))
-            cmds.connectAttr(auto_h, out_buf[i] + ".translate")  # control rides the auto handle
-            out_handle[i] = _lerp_v(man_out[i], auto_h, out_a[i], "{}_oh{}".format(name, i))
+            off = [rest_out[i][k] - cvs[i][k] for k in range(3)]
+            rest_off_out[i] = off
+            rest_h = _add_vc(cv_pos[i], off, "{}_orh{}".format(name, i))
+            buf = _lerp_v(rest_h, auto_h, out_a[i], "{}_obp{}".format(name, i))
+            cmds.connectAttr(buf, out_buf[i] + ".translate")
+            out_handle[i] = man_out[i]   # spline follows the control's world position
         if i > 0:
             auto_vec = _lerp_v(in_linear[i], in_smooth[i], in_s[i], "{}_iav{}".format(name, i))
             auto_h = _add(cv_pos[i], auto_vec, "{}_iah{}".format(name, i))
-            cmds.connectAttr(auto_h, in_buf[i] + ".translate")
-            in_handle[i] = _lerp_v(man_in[i], auto_h, in_a[i], "{}_ih{}".format(name, i))
-    return out_handle, in_handle, out_ctrl, in_ctrl, out_buf, in_buf
+            off = [rest_in[i][k] - cvs[i][k] for k in range(3)]
+            rest_off_in[i] = off
+            rest_h = _add_vc(cv_pos[i], off, "{}_irh{}".format(name, i))
+            buf = _lerp_v(rest_h, auto_h, in_a[i], "{}_ibp{}".format(name, i))
+            cmds.connectAttr(buf, in_buf[i] + ".translate")
+            in_handle[i] = man_in[i]
+    return (out_handle, in_handle, out_ctrl, in_ctrl, out_buf, in_buf,
+            rest_off_out, rest_off_in)
 
 
 # ---- RMF transport node clusters (Stage 2) --------------------------------
@@ -716,8 +740,9 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     # Faithful port of twistMultiTangent: half-angle Catmull-Rom smooth tangents,
     # smooth<->linear blend, manual override, all live. Everything downstream rides
     # the curve, so no other stage changes.
-    out_handle, in_handle, out_ctrl, in_ctrl, out_buf, in_buf = _build_tangents(
-        name, grp, cv_ctrls, cv_pos, rest_in, rest_out)
+    (out_handle, in_handle, out_ctrl, in_ctrl, out_buf, in_buf,
+     rest_off_out, rest_off_in) = _build_tangents(
+        name, grp, cv_ctrls, cv_pos, cvs, rest_in, rest_out)
 
     # Drive every control point from the live CV / tangent-handle plugs.
     for k in range(nseg):
@@ -864,7 +889,8 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     return {"grp": grp, "cv_ctrls": cv_ctrls, "twist_ctrl": twist_ctrls,
             "joints": joints, "curve": curve_shape, "up_curve": up_curve,
             "nseg": nseg, "out_ctrl": out_ctrl, "in_ctrl": in_ctrl,
-            "out_buf": out_buf, "in_buf": in_buf}
+            "out_buf": out_buf, "in_buf": in_buf,
+            "rest_off_out": rest_off_out, "rest_off_in": rest_off_in}
 
 
 def verify_frames(rig, spread=3.0):
@@ -927,37 +953,35 @@ def verify_frames(rig, spread=3.0):
 
 
 def verify_tangents(rig):
-    """Compare the live bezier-handle positions on the curve to the faithful
-    tangent reference (multi_tangent_handles), reading the current
-    Weight/Smooth/Auto and any manual tangent-control offsets off the rig."""
+    """Compare the live AUTO tangent (the buffer the control rides) to the faithful
+    tangent reference (multi_tangent_handles), reading the current Weight/Smooth/
+    Auto. The reference's manual input is the rig's rest offset, so this validates
+    the auto<->rest blend; the control's own offset (which always bends the spline)
+    is exercised by the C++ parity sweep instead."""
     n = len(rig["cv_ctrls"])
     cvs = [cmds.xform(c, q=True, ws=True, t=True) for c in rig["cv_ctrls"]]
     in_w, out_w = [1.0] * n, [1.0] * n
     in_s, out_s = [1.0] * n, [1.0] * n
     in_a, out_a = [1.0] * n, [1.0] * n
-    in_user = [[0.0, 0.0, 0.0] for _ in range(n)]
-    out_user = [[0.0, 0.0, 0.0] for _ in range(n)]
+    in_user = [list(v) if v else [0.0, 0.0, 0.0] for v in rig["rest_off_in"]]
+    out_user = [list(v) if v else [0.0, 0.0, 0.0] for v in rig["rest_off_out"]]
     for i in range(n):
         oc, ic = rig["out_ctrl"][i], rig["in_ctrl"][i]
         if oc:
-            out_w[i] = cmds.getAttr(oc + ".Weight")
-            out_s[i] = cmds.getAttr(oc + ".Smooth")
-            out_a[i] = cmds.getAttr(oc + ".Auto")
-            cw = cmds.xform(oc, q=True, ws=True, t=True)
-            out_user[i] = [cw[k] - cvs[i][k] for k in range(3)]
+            out_w[i], out_s[i], out_a[i] = (cmds.getAttr(oc + ".Weight"),
+                                            cmds.getAttr(oc + ".Smooth"),
+                                            cmds.getAttr(oc + ".Auto"))
         if ic:
-            in_w[i] = cmds.getAttr(ic + ".Weight")
-            in_s[i] = cmds.getAttr(ic + ".Smooth")
-            in_a[i] = cmds.getAttr(ic + ".Auto")
-            cw = cmds.xform(ic, q=True, ws=True, t=True)
-            in_user[i] = [cw[k] - cvs[i][k] for k in range(3)]
+            in_w[i], in_s[i], in_a[i] = (cmds.getAttr(ic + ".Weight"),
+                                         cmds.getAttr(ic + ".Smooth"),
+                                         cmds.getAttr(ic + ".Auto"))
     inh, outh = multi_tangent_handles(cvs, in_w, out_w, in_s, out_s,
                                       in_a, out_a, in_user, out_user)
     nseg = rig["nseg"]
     maxd = 0.0
     for k in range(nseg):
-        op = cmds.pointPosition("{}.cv[{}]".format(rig["curve"], 3 * k + 1), world=True)
-        ip = cmds.pointPosition("{}.cv[{}]".format(rig["curve"], 3 * k + 2), world=True)
+        op = cmds.xform(rig["out_buf"][k], q=True, ws=True, t=True)
+        ip = cmds.xform(rig["in_buf"][k + 1], q=True, ws=True, t=True)
         maxd = max(maxd, vm.length(vm.sub(op, outh[k])))
         maxd = max(maxd, vm.length(vm.sub(ip, inh[k + 1])))
     ok = maxd < 1e-4
