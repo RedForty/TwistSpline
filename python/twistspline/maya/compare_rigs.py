@@ -199,3 +199,116 @@ def compare_native_to_cpp(cv_positions=None, numJoints=10, spread=1.0,
         for i, dp, dr in rows:
             print("  joint {:2d}  dPos={:.4e}  dRot={:.4f} deg".format(i, dp, dr))
     return max_pos, max_rot
+
+
+def _jdelta(nat_joints, cpp_joints):
+    """Worst (position, orientation-deg) difference between matched joints."""
+    import maya.api.OpenMaya as om
+    mp = mr = 0.0
+    for a, b in zip(nat_joints, cpp_joints):
+        pa = cmds.xform(a, q=True, ws=True, t=True)
+        pb = cmds.xform(b, q=True, ws=True, t=True)
+        mp = max(mp, math.sqrt(sum((pa[k] - pb[k]) ** 2 for k in range(3))))
+        ma = om.MMatrix(cmds.xform(a, q=True, ws=True, matrix=True))
+        mb = om.MMatrix(cmds.xform(b, q=True, ws=True, matrix=True))
+        q = om.MTransformationMatrix(ma * mb.inverse()).rotation(asQuaternion=True)
+        mr = max(mr, math.degrees(2.0 * math.acos(max(-1.0, min(1.0, abs(q[3]))))))
+    return mp, mr
+
+
+def parity_sweep(cv_positions=None, numJoints=10, spread=1.0,
+                 tol_pos=1e-2, tol_rot=0.5):
+    """Drive the native and C++ rigs through matched perturbations and compare.
+
+    Each state sets the SAME change on both rigs (CV moves, Pin, twist, tangent
+    Auto/Smooth/Weight + a manual handle) and reports the worst joint position /
+    orientation difference, so parity is confirmed under animation, not just rest.
+    """
+    from . import native_builder
+    if not cmds.pluginInfo("TwistSpline", q=True, loaded=True):
+        cmds.loadPlugin("TwistSpline")
+    if cv_positions is None:
+        cv_positions = [[0, 0, 0], [3, 2, 1], [6, 0, 3], [9, -2, 1], [12, 0, 0]]
+    n = len(cv_positions)
+
+    cppb = _load_cpp_builder()
+    cpp = cppb.makeTwistSpline("cmpCpp", n, numJoints, spread=spread)
+    cpp_d = _unpack(cpp, "cmpCpp", n)
+    cv_c, o_c, i_c, tw_c = cpp_d["cvs"], cpp_d["oCtrls"], cpp_d["iCtrls"], cpp_d["tws"]
+    for c, p in zip(cv_c, cv_positions):
+        cmds.xform(c, ws=True, t=list(p))
+        cmds.setAttr(c + ".Pin", 1.0)
+    tsn = cmds.ls("cmpCpp*", type="twistSpline")  # neutralize the -1 twist default
+    if tsn:
+        cmds.setAttr(tsn[0] + ".twistMultiplier", 1.0)
+    cmds.refresh(force=True)
+
+    nat = native_builder.build_native_spline(
+        cv_positions, numJoints, spread=spread, name="cmpNat",
+        pins=list(range(n)), orient_cvs=[0])
+    cv_n, o_n, i_n = nat["cv_ctrls"], nat["out_ctrl"], nat["in_ctrl"]
+    cmds.refresh(force=True)
+
+    def setboth(np_, cp_, v):
+        cmds.setAttr(np_, v)
+        cmds.setAttr(cp_, v)
+
+    def xboth(nn, cn, p):
+        cmds.xform(nn, ws=True, t=p)
+        cmds.xform(cn, ws=True, t=p)
+
+    results = []
+
+    def check(label):
+        cmds.refresh(force=True)
+        mp, mr = _jdelta(nat["joints"], cpp_d["joints"])
+        flag = "OK" if (mp < tol_pos and mr < tol_rot) else "REVIEW"
+        print("  {:<36} dPos={:.3e}  dRot={:.4f} deg  {}".format(label, mp, mr, flag))
+        results.append((label, mp, mr))
+
+    print("native vs C++ parity sweep:")
+    check("rest")
+
+    # --- twist (all UseTwist=1 so every CV is a twist knot on both sides) ---
+    for k in range(n):
+        setboth(cv_n[k] + ".UseTwist", tw_c[k] + ".UseTwist", 1.0)
+    setboth(cv_n[1] + ".Twist", tw_c[1] + ".rotateX", 45.0)
+    setboth(cv_n[3] + ".Twist", tw_c[3] + ".rotateX", -30.0)
+    check("twist CV1=45 CV3=-30 (all pinned)")
+    # partial UseTwist: float CV2 between the twisted neighbours
+    setboth(cv_n[2] + ".UseTwist", tw_c[2] + ".UseTwist", 0.0)
+    check("  + CV2 UseTwist=0 (float)")
+    setboth(cv_n[1] + ".Twist", tw_c[1] + ".rotateX", 0.0)
+    setboth(cv_n[3] + ".Twist", tw_c[3] + ".rotateX", 0.0)
+    setboth(cv_n[2] + ".UseTwist", tw_c[2] + ".UseTwist", 1.0)
+
+    # --- geometry ---
+    xboth(cv_n[2], cv_c[2], [6, 3, 4])
+    check("move CV2 -> (6,3,4)")
+    xboth(cv_n[2], cv_c[2], list(cv_positions[2]))
+
+    # --- pin ---
+    setboth(cv_n[2] + ".Pin", cv_c[2] + ".Pin", 0.0)
+    check("unpin CV2 (Pin=0)")
+    setboth(cv_n[2] + ".Pin", cv_c[2] + ".Pin", 1.0)
+
+    # --- tangents (native in_ctrl[i] <-> cpp iCtrls[i-1]) ---
+    setboth(o_n[1] + ".Weight", o_c[1] + ".Weight", 2.2)
+    check("out tangent CV1 Weight=2.2")
+    setboth(o_n[1] + ".Weight", o_c[1] + ".Weight", 1.0)
+
+    setboth(i_n[2] + ".Smooth", i_c[1] + ".Smooth", 0.0)
+    check("in tangent CV2 Smooth=0 (linear)")
+    setboth(i_n[2] + ".Smooth", i_c[1] + ".Smooth", 1.0)
+
+    manp = [cv_positions[2][0] + 1.0, cv_positions[2][1] + 2.5, cv_positions[2][2]]
+    setboth(o_n[2] + ".Auto", o_c[2] + ".Auto", 0.0)
+    xboth(o_n[2], o_c[2], manp)
+    check("out tangent CV2 Auto=0 + manual handle")
+    setboth(o_n[2] + ".Auto", o_c[2] + ".Auto", 1.0)
+
+    worst_p = max(r[1] for r in results)
+    worst_r = max(r[2] for r in results)
+    print("SWEEP worst | dPos={:.3e} | dRot={:.4f} deg | {}".format(
+        worst_p, worst_r, "OK" if (worst_p < tol_pos and worst_r < tol_rot) else "REVIEW"))
+    return results
