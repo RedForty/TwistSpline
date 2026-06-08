@@ -523,6 +523,52 @@ def _solve_param_remap(name, pin, pp, arc):
     return x
 
 
+def _solve_twist_param(name, lock, val, arc):
+    """Native Thomas solve of solveTwistParamMatrix -> a live twist value per CV.
+
+    Same tridiagonal matrix as the Pin solve but RHS = UseTwist*Twist: twist-pinned
+    CVs hold their Twist, unpinned CVs FLOAT (arc-interpolated between pins) instead
+    of being kinked to zero. Exact for fractional UseTwist (matches the kernel).
+    `lock[k]`=UseTwist, `val[k]`=Twist, `arc[k]`=cumulative arc length (all plugs).
+    """
+    n = len(lock)
+    oml = [_sub_cp(1.0, lock[i], "{}_oml{}".format(name, i)) for i in range(n)]
+    sub = [None] * n
+    sup = [None] * n
+    res = [None] * n
+    sup[0] = oml[0]
+    res[0] = _mul1(lock[0], val[0], name + "_res0")
+    for i in range(1, n - 1):
+        A = _mul1(_sub1(arc[i], arc[i - 1], "{}_An{}".format(name, i)),
+                  _sub1(arc[i + 1], arc[i - 1], "{}_Ad{}".format(name, i)),
+                  "{}_A{}".format(name, i), divide=True)
+        sub[i] = _mul1(oml[i], _sub_cp(1.0, A, "{}_omA{}".format(name, i)),
+                       "{}_sub{}".format(name, i))
+        sup[i] = _mul1(oml[i], A, "{}_sup{}".format(name, i))
+        res[i] = _mul1(lock[i], val[i], "{}_res{}".format(name, i))
+    e = n - 1
+    sub[e] = oml[e]
+    res[e] = _mul1(lock[e], val[e], name + "_rese")
+    c = [None] * n
+    d = [None] * n
+    c[0] = _scale1(sup[0], -1.0, name + "_c0")
+    d[0] = _scale1(res[0], -1.0, name + "_d0")
+    for i in range(1, n):
+        denom = _sub_cp(-1.0, _mul1(sub[i], c[i - 1], "{}_sc{}".format(name, i)),
+                        "{}_den{}".format(name, i))
+        if i < n - 1:
+            c[i] = _mul1(sup[i], denom, "{}_c{}".format(name, i), divide=True)
+        num = _sub1(res[i], _mul1(sub[i], d[i - 1], "{}_sd{}".format(name, i)),
+                    "{}_num{}".format(name, i))
+        d[i] = _mul1(num, denom, "{}_d{}".format(name, i), divide=True)
+    x = [None] * n
+    x[n - 1] = d[n - 1]
+    for i in range(n - 2, -1, -1):
+        x[i] = _sub1(d[i], _mul1(c[i], x[i + 1], "{}_bx{}".format(name, i)),
+                     "{}_x{}".format(name, i))
+    return x
+
+
 def _signed_angle(a, b, axis, name):
     """Signed angle from unit `a` to unit `b` measured around unit `axis`.
 
@@ -679,12 +725,14 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
         ups[i] = _double_reflect(ups[i - 1], pocis[i - 1] + ".position", pocis[i] + ".position",
                                  tans[i - 1], tans[i], "{}_dr{}".format(name, i))
 
-    # Stage 3: per-CV twist. Every CV is a twist knot (value = Twist * UseTwist),
-    # interpolated piecewise-linearly by *live* arc length between consecutive CVs.
+    # Stage 3: per-CV twist. Solve solveTwistParamMatrix (live) so twist-PINNED CVs
+    # (UseTwist) hold their Twist and unpinned CVs FLOAT between pins -- then the
+    # solved per-CV twist is interpolated by live arc length between CVs.
     arc_cv = [_alen(curve_shape, float(k), "{}_alenCV{}".format(name, k))
               for k in range(nseg + 1)]
-    twist_val = [_mul1(cv_ctrls[k] + ".Twist", cv_ctrls[k] + ".UseTwist",
-                       "{}_tval{}".format(name, k)) for k in range(n)]
+    twist_val = _solve_twist_param(name + "_tw",
+                                   [cv_ctrls[k] + ".UseTwist" for k in range(n)],
+                                   [cv_ctrls[k] + ".Twist" for k in range(n)], arc_cv)
 
     # Stage 4: useOrient. Residual at each orient-pinned CV (angle between the RMF
     # and the control's up, around the tangent) * UseOrient, distributed linearly
