@@ -779,6 +779,14 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     pocis = [_poci(curve_shape, p, "{}_poci{}".format(name, i))
              for i, p in enumerate(sample_params)]
     tans = [pc + ".normalizedTangent" for pc in pocis]
+    # At a non-G1 (kinked) CV -- Auto<1, a moved handle, etc. -- the curve's tangent
+    # is one-sided and pointOnCurveInfo at the knot is ambiguous. Use the true
+    # segment-START tangent (out_handle - CV) at each interior CV sample so the
+    # transport reprojects across the kink exactly like the C++ per-segment RMF.
+    # Smooth (G1) CVs are unaffected (in and out tangents agree there).
+    for k in range(1, nseg):
+        tans[cv_idx[k]] = _norm_v(_sub(out_handle[k], cv_pos[k], "{}_cvtd{}".format(name, k)),
+                                  "{}_cvt{}".format(name, k))
 
     # anchor up = CV0 control Y, reprojected perpendicular to the start tangent
     ups = [None] * len(pocis)
