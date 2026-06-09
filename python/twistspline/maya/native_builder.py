@@ -1122,8 +1122,10 @@ def hide_guts(rig):
     upT = cmds.listRelatives(rig["up_curve"], parent=True, fullPath=True) or []
     for t in upT:
         cmds.parent(t, guts)
-    for s in set(cmds.listConnections(rig["curve"] + ".worldSpace[0]",
-                                      type="arcLengthDimension") or []):
+    # every arcLengthDimension reads the curve (node-level query -- listConnections
+    # on the indexed worldSpace[0] plug doesn't reliably enumerate them)
+    for s in set(cmds.listConnections(rig["curve"], type="arcLengthDimension",
+                                      source=False, destination=True) or []):
         for t in cmds.listRelatives(s, parent=True, fullPath=True) or []:
             cmds.parent(t, guts)
     rig["guts"] = guts
