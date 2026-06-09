@@ -840,6 +840,9 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     # solved per-CV twist is interpolated by live arc length between CVs.
     arc_cv = [_alen(curve_shape, float(k), "{}_alenCV{}".format(name, k))
               for k in range(nseg + 1)]
+    # track the arcLengthDimension nodes so hide_guts can tuck them away (a
+    # node/plug connection query doesn't reliably enumerate worldSpace[0] users)
+    alen_nodes = [p.rsplit(".", 1)[0] for p in arc_cv]
     twist_val = _solve_twist_param(name + "_tw",
                                    [twist_ctrls[k] + ".UseTwist" for k in range(n)],
                                    [twist_ctrls[k] + ".rotateX" for k in range(n)], arc_cv)
@@ -861,8 +864,11 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     for i, p_i in enumerate(sample_params):
         k = min(int(p_i + 1e-9), nseg - 1)  # segment = floor(param), clamped
         on_cv = abs(p_i - round(p_i)) < 1e-9
-        arc_i = arc_cv[int(round(p_i))] if on_cv else \
-            _alen(curve_shape, p_i, "{}_alenS{}".format(name, i))
+        if on_cv:
+            arc_i = arc_cv[int(round(p_i))]
+        else:
+            arc_i = _alen(curve_shape, p_i, "{}_alenS{}".format(name, i))
+            alen_nodes.append(arc_i.rsplit(".", 1)[0])
         w = _mul1(_sub1(arc_i, arc_cv[k], "{}_swn{}".format(name, i)),
                   _sub1(arc_cv[k + 1], arc_cv[k], "{}_swd{}".format(name, i)),
                   "{}_sw{}".format(name, i), divide=True)
@@ -952,7 +958,7 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     return {"grp": grp, "cv_ctrls": cv_ctrls, "twist_ctrl": twist_ctrls,
             "joints": joints, "curve": curve_shape, "up_curve": up_curve,
             "nseg": nseg, "out_ctrl": out_ctrl, "in_ctrl": in_ctrl,
-            "out_buf": out_buf, "in_buf": in_buf,
+            "out_buf": out_buf, "in_buf": in_buf, "alen_nodes": alen_nodes,
             "rest_off_out": rest_off_out, "rest_off_in": rest_off_in}
 
 
@@ -1122,10 +1128,11 @@ def hide_guts(rig):
     upT = cmds.listRelatives(rig["up_curve"], parent=True, fullPath=True) or []
     for t in upT:
         cmds.parent(t, guts)
-    # every arcLengthDimension reads the curve (node-level query -- listConnections
-    # on the indexed worldSpace[0] plug doesn't reliably enumerate them)
-    for s in set(cmds.listConnections(rig["curve"], type="arcLengthDimension",
-                                      source=False, destination=True) or []):
+    # the arcLengthDimension indicators, tracked at build time (a connection query
+    # on the curve's worldSpace[0] doesn't reliably enumerate them)
+    for s in rig.get("alen_nodes", []):
+        if not cmds.objExists(s):
+            continue
         for t in cmds.listRelatives(s, parent=True, fullPath=True) or []:
             cmds.parent(t, guts)
     rig["guts"] = guts
