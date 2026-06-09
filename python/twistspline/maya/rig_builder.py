@@ -87,13 +87,17 @@ def build(name, cv_positions=None, num_cvs=None, num_joints=10, rig_type="native
             if not cmds.attributeQuery("UseOrient", node=c, exists=True):
                 cmds.addAttr(c, longName="UseOrient", attributeType="double",
                              defaultValue=0.0, min=0.0, max=1.0, keyable=True)
+        # The native curve/joints group stays at world origin: the curve's control
+        # points are fed WORLD-space CV positions, so it must NOT sit under the
+        # master -- otherwise the master would transform the rig twice (once via the
+        # controls feeding the curve, once via the group). The master still drives
+        # the whole rig through the controls, exactly like the C++/python backends.
         grp = cmds.createNode("transform", name=name + "_nativeGrp")
-        if master and cmds.objExists(master):
-            grp = cmds.parent(grp, master)[0]
         controls = native_builder.adapt_shared_controls(
             grp, cvs, tws, oCtrls, iCtrls, oBfrs, iBfrs, oRests, iRests)
         rig = native_builder.build_native_spline(
             cv_positions, num_joints, spread=spread, name=name, controls=controls)
+        native_builder.hide_guts(rig)        # tuck away upCurve + arcLength indicators
         rig["rig_type"] = "native"
         rig["master"] = master
         rig.setdefault("group", grp)

@@ -1107,18 +1107,16 @@ def _lock_hide(node, attrs):
             pass
 
 
-def finalize_rig(rig):
-    """Make a built rig animator-friendly: colored NURBS control shapes, internal
-    guts hidden (upCurve + arcLengthDimension nodes), non-animatable channels
-    locked/hidden, and a selection set of the controls. Purely cosmetic -- the
-    node math and C++ parity are unaffected. Call after build_native_spline.
+def hide_guts(rig):
+    """Tuck the internal display geometry (the orientation upCurve and every
+    arcLengthDimension indicator) into a hidden group, so the animator only sees
+    the controls, the spline curve, and the joints. Safe to call on any native rig
+    (standalone or shared-control); does not touch the controls. Returns the group.
     """
     grp = rig["grp"]
     name = grp.rsplit("|", 1)[-1]
     if name.endswith("_grp"):
         name = name[:-4]
-
-    # hidden 'guts' group for the internal display geometry
     guts = cmds.createNode("transform", name=name + "_guts", parent=grp)
     cmds.setAttr(guts + ".visibility", 0)
     upT = cmds.listRelatives(rig["up_curve"], parent=True, fullPath=True) or []
@@ -1128,6 +1126,25 @@ def finalize_rig(rig):
                                       type="arcLengthDimension") or []):
         for t in cmds.listRelatives(s, parent=True, fullPath=True) or []:
             cmds.parent(t, guts)
+    rig["guts"] = guts
+    return guts
+
+
+def finalize_rig(rig):
+    """Make a built rig animator-friendly: colored NURBS control shapes, internal
+    guts hidden (upCurve + arcLengthDimension nodes), non-animatable channels
+    locked/hidden, and a selection set of the controls. Purely cosmetic -- the
+    node math and C++ parity are unaffected. Call after build_native_spline.
+
+    For shared-control (production) rigs the controls are already shaped, so call
+    hide_guts() instead of this to avoid re-shaping them.
+    """
+    grp = rig["grp"]
+    name = grp.rsplit("|", 1)[-1]
+    if name.endswith("_grp"):
+        name = name[:-4]
+
+    hide_guts(rig)
 
     # colored shapes: CV=yellow circle, twist=red dial (around X), tangents=cubes
     for c in rig["cv_ctrls"]:
@@ -1155,5 +1172,4 @@ def finalize_rig(rig):
     anim = (rig["cv_ctrls"] + rig["twist_ctrl"]
             + [c for c in rig["out_ctrl"] + rig["in_ctrl"] if c])
     rig["set"] = cmds.sets(anim, name=name + "_controls")
-    rig["guts"] = guts
     return rig
