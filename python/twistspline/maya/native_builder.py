@@ -100,6 +100,16 @@ def _point_mat(vec_const, matrix_plug, name):
     return n + ".output"
 
 
+def _world_to_local(world_plug, parent_inv_plug, name):
+    """A world-space point plug expressed in a transform's parent space, so it can
+    drive that transform's `.translate` no matter where it sits in the hierarchy."""
+    n = cmds.createNode("vectorProduct", name=name)
+    cmds.setAttr(n + ".operation", 4)  # point-matrix product
+    cmds.connectAttr(world_plug, n + ".input1")
+    cmds.connectAttr(parent_inv_plug, n + ".matrix")
+    return n + ".output"
+
+
 def _scale_vp(a, s_plug, name):
     """Scale a 3-vector plug by a scalar plug."""
     n = cmds.createNode("multiplyDivide", name=name)
@@ -134,48 +144,54 @@ def _add_tan_attrs(ctrl):
 
 
 def _build_tangents(name, grp, cv_ctrls, cv_pos, cvs, rest_in, rest_out,
-                    start_tension=2.0, tan_rest=1.0):
+                    start_tension=2.0, tan_rest=1.0,
+                    out_ctrl=None, in_ctrl=None, out_buf=None, in_buf=None,
+                    rest_out_plug=None, rest_in_plug=None):
     """Native port of twistMultiTangent handle positions (open spline).
 
-    Creates per-CV in/out tangent controls (children of the CV control) carrying
-    Auto/Smooth/Weight, computes the smooth (half-angle Catmull-Rom, weighted) and
-    linear tangents live, blends smooth<->linear by Smooth and auto<->manual by
-    Auto, and returns (out_handle, in_handle, out_ctrl, in_ctrl). out_handle[i] is
-    valid for i in 0..n-2, in_handle[i] for i in 1..n-1 (others None).
+    Computes the smooth (half-angle Catmull-Rom, weighted) and linear tangents
+    live, blends smooth<->linear by Smooth and auto<->manual by Auto. Each tangent
+    control rides an auto-driven BUFFER so it tracks the computed tangent in Auto
+    mode; the control's translate is the manual offset. The spline reads the
+    control's world position, so a manual offset always bends it.
+
+    If `out_ctrl`/`in_ctrl`/`out_buf`/`in_buf` are given (the shared control rig),
+    they are used as-is; otherwise simple locator controls are created. Likewise
+    `rest_out_plug`/`rest_in_plug` (the Auto=0 rest reference, world-space point
+    plugs per CV) override the default straight +/- tan_rest along the CV's X.
+    Returns (out_handle, in_handle, out_ctrl, in_ctrl, out_buf, in_buf,
+    rest_off_out, rest_off_in).
     """
     n = len(cv_ctrls)
-    out_ctrl = [None] * n
-    in_ctrl = [None] * n
-    out_w = [None] * n
-    in_w = [None] * n
-    out_s = [None] * n
-    in_s = [None] * n
-    out_a = [None] * n
-    in_a = [None] * n
-    man_out = [None] * n
-    man_in = [None] * n
-    out_buf = [None] * n
-    in_buf = [None] * n
-    # Each tangent control rides an auto-driven BUFFER (wired to the live auto
-    # handle below), so in Auto mode it tracks the computed tangent as the CVs
-    # move; the control's own translate is the manual offset from there.
+    shared = out_ctrl is not None
+    if not shared:
+        out_ctrl, in_ctrl = [None] * n, [None] * n
+        out_buf, in_buf = [None] * n, [None] * n
+    out_w, in_w = [None] * n, [None] * n
+    out_s, in_s = [None] * n, [None] * n
+    out_a, in_a = [None] * n, [None] * n
+    man_out, man_in = [None] * n, [None] * n
     for i in range(n):
         if i < n - 1:
-            buf = cmds.createNode("transform", name="{}_outbuf{}".format(name, i), parent=grp)
-            c = cmds.spaceLocator(name="{}_outtan{}".format(name, i))[0]
-            c = cmds.ls(cmds.parent(c, buf)[0], long=True)[0]
-            cmds.setAttr(c + ".translate", 0, 0, 0)
-            _add_tan_attrs(c)
-            out_buf[i], out_ctrl[i] = buf, c
+            if not shared:
+                buf = cmds.createNode("transform", name="{}_outbuf{}".format(name, i), parent=grp)
+                c = cmds.spaceLocator(name="{}_outtan{}".format(name, i))[0]
+                c = cmds.ls(cmds.parent(c, buf)[0], long=True)[0]
+                cmds.setAttr(c + ".translate", 0, 0, 0)
+                _add_tan_attrs(c)
+                out_buf[i], out_ctrl[i] = buf, c
+            c = out_ctrl[i]
             out_w[i], out_s[i], out_a[i] = c + ".Weight", c + ".Smooth", c + ".Auto"
             man_out[i] = _decompose(c)
         if i > 0:
-            buf = cmds.createNode("transform", name="{}_inbuf{}".format(name, i), parent=grp)
-            c = cmds.spaceLocator(name="{}_intan{}".format(name, i))[0]
-            c = cmds.ls(cmds.parent(c, buf)[0], long=True)[0]
-            cmds.setAttr(c + ".translate", 0, 0, 0)
-            _add_tan_attrs(c)
-            in_buf[i], in_ctrl[i] = buf, c
+            if not shared:
+                buf = cmds.createNode("transform", name="{}_inbuf{}".format(name, i), parent=grp)
+                c = cmds.spaceLocator(name="{}_intan{}".format(name, i))[0]
+                c = cmds.ls(cmds.parent(c, buf)[0], long=True)[0]
+                cmds.setAttr(c + ".translate", 0, 0, 0)
+                _add_tan_attrs(c)
+                in_buf[i], in_ctrl[i] = buf, c
+            c = in_ctrl[i]
             in_w[i], in_s[i], in_a[i] = c + ".Weight", c + ".Smooth", c + ".Auto"
             man_in[i] = _decompose(c)
 
@@ -262,19 +278,27 @@ def _build_tangents(name, grp, cv_ctrls, cv_pos, cvs, rest_in, rest_out,
             auto_vec = _lerp_v(out_linear[i], out_smooth[i], out_s[i], "{}_oav{}".format(name, i))
             auto_h = _add(cv_pos[i], auto_vec, "{}_oah{}".format(name, i))
             rest_off_out[i] = [tan_rest, 0.0, 0.0]
-            rest_h = _point_mat([tan_rest, 0.0, 0.0], cv_ctrls[i] + ".worldMatrix[0]",
-                                "{}_orh{}".format(name, i))
+            rest_h = (rest_out_plug[i] if rest_out_plug is not None else
+                      _point_mat([tan_rest, 0.0, 0.0], cv_ctrls[i] + ".worldMatrix[0]",
+                                 "{}_orh{}".format(name, i)))
             buf = _lerp_v(rest_h, auto_h, out_a[i], "{}_obp{}".format(name, i))
-            cmds.connectAttr(buf, out_buf[i] + ".translate")
+            # drive the buffer's translate in its own parent space (works under any
+            # hierarchy: grouped flat for native, nested for the shared control rig)
+            cmds.connectAttr(_world_to_local(buf, out_buf[i] + ".parentInverseMatrix[0]",
+                                             "{}_ob2l{}".format(name, i)),
+                             out_buf[i] + ".translate")
             out_handle[i] = man_out[i]   # spline follows the control's world position
         if i > 0:
             auto_vec = _lerp_v(in_linear[i], in_smooth[i], in_s[i], "{}_iav{}".format(name, i))
             auto_h = _add(cv_pos[i], auto_vec, "{}_iah{}".format(name, i))
             rest_off_in[i] = [-tan_rest, 0.0, 0.0]
-            rest_h = _point_mat([-tan_rest, 0.0, 0.0], cv_ctrls[i] + ".worldMatrix[0]",
-                                "{}_irh{}".format(name, i))
+            rest_h = (rest_in_plug[i] if rest_in_plug is not None else
+                      _point_mat([-tan_rest, 0.0, 0.0], cv_ctrls[i] + ".worldMatrix[0]",
+                                 "{}_irh{}".format(name, i)))
             buf = _lerp_v(rest_h, auto_h, in_a[i], "{}_ibp{}".format(name, i))
-            cmds.connectAttr(buf, in_buf[i] + ".translate")
+            cmds.connectAttr(_world_to_local(buf, in_buf[i] + ".parentInverseMatrix[0]",
+                                             "{}_ib2l{}".format(name, i)),
+                             in_buf[i] + ".translate")
             in_handle[i] = man_in[i]
     return (out_handle, in_handle, out_ctrl, in_ctrl, out_buf, in_buf,
             rest_off_out, rest_off_in)
@@ -680,11 +704,16 @@ def _add_twist_attrs(ctrl):
 
 def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
                         samples_per_interval=20, pins=None, orient_cvs=None,
-                        tan_rest=None):
+                        tan_rest=None, controls=None):
     """Live curve from CV controls + RMF-oriented joints + per-CV control attrs.
 
-    Stage 1+2: position via the live degree-3 curve, orientation via a
-    parallel-transport RMF chain. Returns a dict of node names.
+    Position via the live degree-3 curve, orientation via a double-reflection RMF.
+    Returns a dict of node names.
+
+    If `controls` (a dict from the shared production control rig) is given, the
+    native node graph is wired onto those controls instead of creating its own --
+    it must provide grp, cv_ctrls, twist_ctrl, out_ctrl, in_ctrl, out_buf, in_buf,
+    rest_out, rest_in. Otherwise simple locator controls are created (standalone).
     """
     # matrixNodes (decompose/compose/pointMatrixMult/fourByFourMatrix) and
     # quatNodes (axisAngleToQuat) ship WITH Maya and auto-load on scene open --
@@ -699,27 +728,38 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     # rest (default) bezier handle positions from the faithful tangent reference
     rest_in, rest_out = multi_tangent_handles(cvs)
 
-    grp = cmds.createNode("transform", name=name + "_grp")
+    if controls is None:
+        grp = cmds.createNode("transform", name=name + "_grp")
+        # CV control transforms with the per-CV attributes, each with a child Twist
+        # control (its rotateX injects twist at that CV, like the real rig).
+        cv_ctrls = []
+        twist_ctrls = []
+        for i in range(n):
+            c = cmds.spaceLocator(name="{}_cv{}".format(name, i))[0]
+            # full DAG path so a same-named rebuild in one scene stays unambiguous
+            c = cmds.ls(cmds.parent(c, grp)[0], long=True)[0]
+            cmds.xform(c, worldSpace=True, translation=cvs[i])
+            _add_cv_attrs(c)
+            cv_ctrls.append(c)
+            tw = cmds.spaceLocator(name="{}_cv{}_twist".format(name, i))[0]
+            tw = cmds.ls(cmds.parent(tw, c)[0], long=True)[0]
+            cmds.setAttr(tw + ".translate", 0, 0, 0)
+            _add_twist_attrs(tw)
+            twist_ctrls.append(tw)
+        tan_kwargs = {}
+    else:
+        grp = controls["grp"]
+        cv_ctrls = controls["cv_ctrls"]
+        twist_ctrls = controls["twist_ctrl"]
+        tan_kwargs = dict(out_ctrl=controls["out_ctrl"], in_ctrl=controls["in_ctrl"],
+                          out_buf=controls["out_buf"], in_buf=controls["in_buf"],
+                          rest_out_plug=controls["rest_out"],
+                          rest_in_plug=controls["rest_in"])
+
     curve_tfm = cmds.createNode("transform", name=name + "_curve", parent=grp)
 
-    # CV control transforms with the per-CV attributes, each with a child Twist
-    # control (its rotateX injects twist at that CV, like the real rig).
-    cv_ctrls = []
-    twist_ctrls = []
-    for i in range(n):
-        c = cmds.spaceLocator(name="{}_cv{}".format(name, i))[0]
-        # full DAG path so a same-named rebuild in one scene stays unambiguous
-        c = cmds.ls(cmds.parent(c, grp)[0], long=True)[0]
-        cmds.xform(c, worldSpace=True, translation=cvs[i])
-        _add_cv_attrs(c)
-        cv_ctrls.append(c)
-        tw = cmds.spaceLocator(name="{}_cv{}_twist".format(name, i))[0]
-        tw = cmds.ls(cmds.parent(tw, c)[0], long=True)[0]
-        cmds.setAttr(tw + ".translate", 0, 0, 0)
-        _add_twist_attrs(tw)
-        twist_ctrls.append(tw)
     # Default pin pattern (matches the real rig): twist@CV0, orient@first+last,
-    # and the endpoints anchor the param range (Pin is now a live 0..1 blend).
+    # and the endpoints anchor the param range (Pin is a live 0..1 blend).
     cmds.setAttr(twist_ctrls[0] + ".UseTwist", 1.0)
     # orient-locked CVs (default first+last; pass orient_cvs=[0] to match the C++
     # builder's CV0-only default for parity).
@@ -757,7 +797,7 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     (out_handle, in_handle, out_ctrl, in_ctrl, out_buf, in_buf,
      rest_off_out, rest_off_in) = _build_tangents(
         name, grp, cv_ctrls, cv_pos, cvs, rest_in, rest_out,
-        tan_rest=(spread if tan_rest is None else tan_rest))
+        tan_rest=(spread if tan_rest is None else tan_rest), **tan_kwargs)
 
     # Drive every control point from the live CV / tangent-handle plugs.
     for k in range(nseg):
@@ -800,6 +840,9 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     # solved per-CV twist is interpolated by live arc length between CVs.
     arc_cv = [_alen(curve_shape, float(k), "{}_alenCV{}".format(name, k))
               for k in range(nseg + 1)]
+    # track the arcLengthDimension nodes so hide_guts can tuck them away (a
+    # node/plug connection query doesn't reliably enumerate worldSpace[0] users)
+    alen_nodes = [p.rsplit(".", 1)[0] for p in arc_cv]
     twist_val = _solve_twist_param(name + "_tw",
                                    [twist_ctrls[k] + ".UseTwist" for k in range(n)],
                                    [twist_ctrls[k] + ".rotateX" for k in range(n)], arc_cv)
@@ -821,8 +864,11 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     for i, p_i in enumerate(sample_params):
         k = min(int(p_i + 1e-9), nseg - 1)  # segment = floor(param), clamped
         on_cv = abs(p_i - round(p_i)) < 1e-9
-        arc_i = arc_cv[int(round(p_i))] if on_cv else \
-            _alen(curve_shape, p_i, "{}_alenS{}".format(name, i))
+        if on_cv:
+            arc_i = arc_cv[int(round(p_i))]
+        else:
+            arc_i = _alen(curve_shape, p_i, "{}_alenS{}".format(name, i))
+            alen_nodes.append(arc_i.rsplit(".", 1)[0])
         w = _mul1(_sub1(arc_i, arc_cv[k], "{}_swn{}".format(name, i)),
                   _sub1(arc_cv[k + 1], arc_cv[k], "{}_swd{}".format(name, i)),
                   "{}_sw{}".format(name, i), divide=True)
@@ -884,12 +930,31 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     seg_arc = [_sub1(arc_cv[k + 1], arc_cv[k], "{}_segarc{}".format(name, k))
                for k in range(nseg)]
     total_arc = arc_cv[-1]
+    # Master globals (shared-control rig): Offset slides the whole joint chain along
+    # the curve, Stretch scales the distribution -- the C++ rider's globalOffset /
+    # globalSpread. Each joint's param becomes (param*Stretch + Offset*paramRange)
+    # before the remap, matching params[i]*gSpread + gOffset normalized to the range.
+    master = (controls or {}).get("master")
+    if (master and cmds.objExists(master)
+            and cmds.attributeQuery("Offset", node=master, exists=True)):
+        off_plug, str_plug = master + ".Offset", master + ".Stretch"
+    else:
+        off_plug = str_plug = None
     joints = []
     for j in range(num_joints):
-        t_j = pmin + (pmax - pmin) * j / (num_joints - 1.0) if num_joints > 1 else pmin
+        t_base = pmin + (pmax - pmin) * j / (num_joints - 1.0) if num_joints > 1 else pmin
+        if off_plug is not None:                 # live Offset/Stretch
+            t_j = _add1(_scale1(str_plug, t_base, "{}_jstr{}".format(name, j)),
+                        _scale1(off_plug, pmax, "{}_joff{}".format(name, j)),
+                        "{}_jt{}".format(name, j))
+        else:
+            t_j = t_base
         cterms = []
         for k in range(nseg):
-            inv = _mul1(_sub_cp(t_j, remap[k], "{}_jin{}_{}".format(name, j, k)),
+            num = (_sub1(t_j, remap[k], "{}_jin{}_{}".format(name, j, k))
+                   if off_plug is not None
+                   else _sub_cp(t_j, remap[k], "{}_jin{}_{}".format(name, j, k)))
+            inv = _mul1(num,
                         _sub1(remap[k + 1], remap[k], "{}_jid{}_{}".format(name, j, k)),
                         "{}_ji{}_{}".format(name, j, k), divide=True)
             cterms.append(_clamp01(inv, "{}_jc{}_{}".format(name, j, k)))
@@ -912,8 +977,30 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     return {"grp": grp, "cv_ctrls": cv_ctrls, "twist_ctrl": twist_ctrls,
             "joints": joints, "curve": curve_shape, "up_curve": up_curve,
             "nseg": nseg, "out_ctrl": out_ctrl, "in_ctrl": in_ctrl,
-            "out_buf": out_buf, "in_buf": in_buf,
+            "out_buf": out_buf, "in_buf": in_buf, "alen_nodes": alen_nodes,
             "rest_off_out": rest_off_out, "rest_off_in": rest_off_in}
+
+
+def adapt_shared_controls(grp, cv_ctrls, twist_ctrls, o_ctrls, i_ctrls,
+                          o_bufs, i_bufs, o_rests, i_rests, master=None):
+    """Map the production control rig (builder.mkTwistSplineControllers) into the
+    dict build_native_spline(controls=...) expects. The per-segment tangent lists
+    are padded to length n (out at i=0..n-2, in at i=1..n-1), and the rest buffers
+    are decomposed to world-space point plugs (the Auto=0 reference). `master`, if
+    given, drives the joint chain's Offset/Stretch globals.
+    """
+    return {
+        "grp": grp,
+        "master": master,
+        "cv_ctrls": list(cv_ctrls),
+        "twist_ctrl": list(twist_ctrls),
+        "out_ctrl": list(o_ctrls) + [None],
+        "in_ctrl": [None] + list(i_ctrls),
+        "out_buf": list(o_bufs) + [None],
+        "in_buf": [None] + list(i_bufs),
+        "rest_out": [_decompose(o) for o in o_rests] + [None],
+        "rest_in": [None] + [_decompose(o) for o in i_rests],
+    }
 
 
 def verify_frames(rig, spread=3.0):
@@ -1047,27 +1134,47 @@ def _lock_hide(node, attrs):
             pass
 
 
+def hide_guts(rig):
+    """Tuck the internal display geometry (the orientation upCurve and every
+    arcLengthDimension indicator) into a hidden group, so the animator only sees
+    the controls, the spline curve, and the joints. Safe to call on any native rig
+    (standalone or shared-control); does not touch the controls. Returns the group.
+    """
+    grp = rig["grp"]
+    name = grp.rsplit("|", 1)[-1]
+    if name.endswith("_grp"):
+        name = name[:-4]
+    guts = cmds.createNode("transform", name=name + "_guts", parent=grp)
+    cmds.setAttr(guts + ".visibility", 0)
+    upT = cmds.listRelatives(rig["up_curve"], parent=True, fullPath=True) or []
+    for t in upT:
+        cmds.parent(t, guts)
+    # the arcLengthDimension indicators, tracked at build time (a connection query
+    # on the curve's worldSpace[0] doesn't reliably enumerate them)
+    for s in rig.get("alen_nodes", []):
+        if not cmds.objExists(s):
+            continue
+        for t in cmds.listRelatives(s, parent=True, fullPath=True) or []:
+            cmds.parent(t, guts)
+    rig["guts"] = guts
+    return guts
+
+
 def finalize_rig(rig):
     """Make a built rig animator-friendly: colored NURBS control shapes, internal
     guts hidden (upCurve + arcLengthDimension nodes), non-animatable channels
     locked/hidden, and a selection set of the controls. Purely cosmetic -- the
     node math and C++ parity are unaffected. Call after build_native_spline.
+
+    For shared-control (production) rigs the controls are already shaped, so call
+    hide_guts() instead of this to avoid re-shaping them.
     """
     grp = rig["grp"]
     name = grp.rsplit("|", 1)[-1]
     if name.endswith("_grp"):
         name = name[:-4]
 
-    # hidden 'guts' group for the internal display geometry
-    guts = cmds.createNode("transform", name=name + "_guts", parent=grp)
-    cmds.setAttr(guts + ".visibility", 0)
-    upT = cmds.listRelatives(rig["up_curve"], parent=True, fullPath=True) or []
-    for t in upT:
-        cmds.parent(t, guts)
-    for s in set(cmds.listConnections(rig["curve"] + ".worldSpace[0]",
-                                      type="arcLengthDimension") or []):
-        for t in cmds.listRelatives(s, parent=True, fullPath=True) or []:
-            cmds.parent(t, guts)
+    hide_guts(rig)
 
     # colored shapes: CV=yellow circle, twist=red dial (around X), tangents=cubes
     for c in rig["cv_ctrls"]:
@@ -1095,5 +1202,4 @@ def finalize_rig(rig):
     anim = (rig["cv_ctrls"] + rig["twist_ctrl"]
             + [c for c in rig["out_ctrl"] + rig["in_ctrl"] if c])
     rig["set"] = cmds.sets(anim, name=name + "_controls")
-    rig["guts"] = guts
     return rig

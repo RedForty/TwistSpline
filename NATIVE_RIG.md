@@ -8,6 +8,7 @@ It reproduces the real (C++) TwistSpline feature-for-feature and has been
 validated **directly against the compiled C++ plugin**, joint-for-joint, to
 sub-millimetre position and sub-0.1° orientation for all smooth-tangent work.
 
+- Unified entry point: `python/twistspline/maya/rig_builder.py` (native/cpp/python)
 - Builder / verifiers: `python/twistspline/maya/native_builder.py`
 - Maya-free references: `native_ref.py`, `tangent_ref.py`, `solve.py`, `core.py`
 - C++ parity harness: `python/twistspline/maya/compare_rigs.py`
@@ -44,6 +45,43 @@ dict with `cv_ctrls`, `twist_ctrl`, `out_ctrl`/`in_ctrl` (+ buffers), `joints`,
 
 ---
 
+## Unified builder — one control rig, three backends
+
+`rig_builder.build(...)` is the single entry point for all three TwistSpline
+backends. They build from identical inputs and return the **same normalized dict**,
+and — critically — they all drive the **same production control rig**
+(`builder.mkTwistSplineControllers`: CV / twist / tangent / master controls), so a
+control-rig improvement is inherited by every backend.
+
+```python
+from twistspline.maya import rig_builder
+
+cvs = [[0,0,0],[3,2,1],[6,0,3],[9,-2,1],[12,0,0]]
+rig = rig_builder.build("L_tail", cv_positions=cvs, num_joints=10,
+                        rig_type="native")     # or "cpp" / "python"
+```
+
+| `rig_type` | Backend | Plugin required |
+|---|---|---|
+| `"native"` | 100% stock Maya nodes (this document) | none |
+| `"cpp"` | compiled `TwistSpline` plugin | `TwistSpline` |
+| `"python"` | `pyTwistSplinePlugin` scripted nodes | `pyTwistSpline` |
+
+Returns: `rig_type, group, cv_ctrls, twist_ctrl, out_ctrl, in_ctrl, joints, curve,
+master`. The native backend wires its node graph onto the shared controls via
+`build_native_spline(..., controls=<adapted dict>)`; standalone
+`build_native_spline()` (locator controls) still exists as a lightweight,
+plugin-free path used by the verifiers and the parity suite.
+
+The native curve is fed **world-space** CV positions, so its curve/joints group
+stays at world origin — the master drives the rig through the *controls*, exactly
+like the C++/python backends (never parent that group under the master, or it
+double-transforms). On the shared-control path, call `hide_guts(rig)` (the shipping
+rig keeps its already-shaped production controls; `finalize_rig` is for the
+standalone locator rig).
+
+---
+
 ## How it works (node graph)
 
 1. **Curve** — a live degree-3 bezier-form NURBS curve whose control points are
@@ -66,6 +104,14 @@ dict with `cv_ctrls`, `twist_ctrl`, `out_ctrl`/`in_ctrl` (+ buffers), `joints`,
 7. **Joints** — distributed by **arc length** (like the C++ rider) via
    `motionPath`, with the curve param recovered (`nearestPointOnCurve`) to sample
    the upCurve for orientation.
+8. **Master globals** (shared-control rig) — the master's `Offset` slides the whole
+   joint chain along the curve and `Stretch` scales its distribution, matching the
+   C++ rider's `globalOffset` / `globalSpread`: each joint's param becomes
+   `param * Stretch + Offset * paramRange` before the arc-length remap. Live, and
+   validated against C++ in-range. *Caveat:* when `Offset`/`Stretch` push a joint's
+   param **past the curve ends**, the native clamps it to the endpoint whereas the
+   C++ rider extrapolates along the end tangent (NURBS curves don't extrapolate, so
+   `motionPath` can't either) — a small difference only on joints driven off the end.
 
 ### The key insight
 
@@ -92,6 +138,10 @@ Two layers, both reproducible:
   rig from identical inputs and compares **joint-for-joint** across a systematic
   battery (CV moves, orient, the full twist range incl. fractional `UseTwist`,
   Pin incl. fractional, tangent Weight/Smooth/Auto + moves, combined poses).
+  `parity_suite(use_production=True)` runs the same battery against the native rig
+  built through `rig_builder` (wired onto the **shared** production controls, the
+  shipping path) — it matches the locator run exactly, confirming the shared-control
+  native graph is numerically identical to the validated one.
 
 Result: **sub-millimetre position, <0.06° orientation** for all smooth-tangent
 states. Several real bugs were found and fixed via this parity work — e.g. a
@@ -115,3 +165,9 @@ per-segment with discontinuities at kinked CVs.
 `finalize_rig(rig)` is optional and purely cosmetic (it never touches the math):
 colored NURBS control shapes, internal guts (upCurve + arcLengthDimension nodes)
 hidden, non-animatable channels locked/hidden, and a `…_controls` selection set.
+Use it on the **standalone** locator rig.
+
+`hide_guts(rig)` is the guts-hiding step on its own (upCurve + arcLengthDimension
+indicators into a hidden group) without re-shaping controls — use it for the
+**shared-control** rig, whose production controls are already shaped.
+`rig_builder.build("...", rig_type="native")` calls it for you.

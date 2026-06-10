@@ -12,6 +12,13 @@ the C++ rig (`max dPos = 0.0`) under arbitrary control manipulation.
 > it works. For what a TwistSpline *is* and how to rig with it, see the
 > top-level [`README.md`](../README.md) and [`nodeDocs.md`](../nodeDocs.md).
 
+> **Three backends, one control rig.** There are now three feature-parity
+> implementations — the C++ plugin, this Python port, and an all-stock-node
+> [native rig](../NATIVE_RIG.md) (no plugin at all). All three drive the same
+> production control rig (`builder.mkTwistSplineControllers`), and
+> `rig_builder.build(name, cv_positions=…, num_joints=…, rig_type="native"|"cpp"|"python")`
+> is the single entry point that builds any of them from identical inputs.
+
 ---
 
 ## Quick start

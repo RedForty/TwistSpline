@@ -324,10 +324,15 @@ def parity_sweep(cv_positions=None, numJoints=10, spread=1.0,
 
 
 def parity_suite(cv_positions=None, numJoints=10, spread=1.0,
-                 tol_pos=1e-2, tol_rot=0.8, samples=20):
+                 tol_pos=1e-2, tol_rot=0.8, samples=20, use_production=False):
     """Systematic native-vs-C++ parity: every control type across a value range,
     plus combined poses. One state at a time (set both, compare, reset). Reports
     per-state OK/REVIEW and a pass/fail summary. Needs the C++ TwistSpline plugin.
+
+    use_production=True builds the native rig through rig_builder -- i.e. wired onto
+    the SHARED mkTwistSplineControllers controls (the shipping path) instead of the
+    standalone locator controls -- so the suite validates the real shared-control
+    rig. Both read the same control values, so results should match the locator run.
     """
     from . import native_builder
     if not cmds.pluginInfo("TwistSpline", q=True, loaded=True):
@@ -347,10 +352,20 @@ def parity_suite(cv_positions=None, numJoints=10, spread=1.0,
     if tsn:
         cmds.setAttr(tsn[0] + ".twistMultiplier", 1.0)
     cmds.refresh(force=True)
-    nat = native_builder.build_native_spline(
-        cv_positions, numJoints, spread=spread, name="cmpNat",
-        pins=list(range(n)), orient_cvs=[0], tan_rest=spread,
-        samples_per_interval=samples)
+    if use_production:
+        from . import rig_builder
+        nat = rig_builder.build("cmpNat", cv_positions=cv_positions,
+                                num_joints=numJoints, rig_type="native", spread=spread)
+        # match the C++-parity control state the suite assumes (all CVs pinned so
+        # the param map is exact, orient locked at CV0 only like the C++ default)
+        for idx, c in enumerate(nat["cv_ctrls"]):
+            cmds.setAttr(c + ".Pin", 1.0)
+            cmds.setAttr(c + ".UseOrient", 1.0 if idx == 0 else 0.0)
+    else:
+        nat = native_builder.build_native_spline(
+            cv_positions, numJoints, spread=spread, name="cmpNat",
+            pins=list(range(n)), orient_cvs=[0], tan_rest=spread,
+            samples_per_interval=samples)
     cv_n, o_n, i_n, tw_n = (nat["cv_ctrls"], nat["out_ctrl"], nat["in_ctrl"],
                             nat["twist_ctrl"])
     cmds.refresh(force=True)
@@ -437,6 +452,19 @@ def parity_suite(cv_positions=None, numJoints=10, spread=1.0,
         chk("{} moved world (Auto=1)".format(label))
         cmds.setAttr(tn + ".translate", 0, 0, 0)
         cmds.setAttr(tc + ".translate", 0, 0, 0)
+
+    # master Offset / Stretch globals (shared-control native has a master). Values
+    # kept in-range -- every joint's effective param (param*Stretch + Offset) stays
+    # within [0,1] -- since past the curve end the native clamps but C++ extrapolates
+    # along the tangent (a documented difference, not a formula error).
+    if use_production and nat.get("master") and cpp_d.get("master"):
+        mn, mc = nat["master"], cpp_d["master"]
+        for off, st in [(0.0, 0.8), (0.0, 0.6), (0.1, 0.8), (0.2, 0.7), (0.15, 0.85)]:
+            setb(mn + ".Offset", mc + ".Offset", off)
+            setb(mn + ".Stretch", mc + ".Stretch", st)
+            chk("master Offset={:.2f} Stretch={:.2f}".format(off, st))
+        setb(mn + ".Offset", mc + ".Offset", 0.0)
+        setb(mn + ".Stretch", mc + ".Stretch", 1.0)
 
     # combined pose
     xb(cv_n[1], cv_c[1], [cv_positions[1][k] + [1, 2, -1][k] for k in range(3)])
