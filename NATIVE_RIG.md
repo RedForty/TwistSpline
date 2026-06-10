@@ -104,6 +104,14 @@ standalone locator rig).
 7. **Joints** — distributed by **arc length** (like the C++ rider) via
    `motionPath`, with the curve param recovered (`nearestPointOnCurve`) to sample
    the upCurve for orientation.
+8. **Master globals** (shared-control rig) — the master's `Offset` slides the whole
+   joint chain along the curve and `Stretch` scales its distribution, matching the
+   C++ rider's `globalOffset` / `globalSpread`: each joint's param becomes
+   `param * Stretch + Offset * paramRange` before the arc-length remap. Live, and
+   validated against C++ in-range. *Caveat:* when `Offset`/`Stretch` push a joint's
+   param **past the curve ends**, the native clamps it to the endpoint whereas the
+   C++ rider extrapolates along the end tangent (NURBS curves don't extrapolate, so
+   `motionPath` can't either) — a small difference only on joints driven off the end.
 
 ### The key insight
 
