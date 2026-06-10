@@ -527,6 +527,15 @@ def _clamp01(plug, name):
     return n + ".outputR"
 
 
+def _max0(plug, name):
+    """max(plug, 0) (1D) -- clamp below at zero, unbounded above."""
+    n = cmds.createNode("clamp", name=name)
+    cmds.setAttr(n + ".minR", 0.0)
+    cmds.setAttr(n + ".maxR", 1.0e12)
+    cmds.connectAttr(plug, n + ".inputR")
+    return n + ".outputR"
+
+
 def _sumN(plugs, name):
     """Sum of a list of 1D plugs."""
     n = cmds.createNode("plusMinusAverage", name=name)
@@ -969,8 +978,31 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
         up_par = _scale1(u_arc, float(samples_per_interval), "{}_jus{}".format(name, j))
         jup = _poci_live(up_curve, up_par, "{}_jup{}".format(name, j))
         up = _reproject(jup + ".position", jp + ".normalizedTangent", "{}_jrp{}".format(name, j))
+        if off_plug is not None:
+            # Extrapolate past the curve ends like the C++ rider: ride out LINEARLY
+            # along the unit end/start tangent by the overflow arc length. The frame
+            # is already held (motionPath/upCurve clamp to the end), so only the
+            # position needs this; in range both extras are 0 (no-op).
+            last_seg = _sub1(remap[nseg], remap[nseg - 1], "{}_jeed{}".format(name, j))
+            end_over = _max0(_add_pc(
+                _mul1(_sub1(t_j, remap[nseg - 1], "{}_jeen{}".format(name, j)),
+                      last_seg, "{}_jee{}".format(name, j), divide=True),
+                -1.0, "{}_jeo{}".format(name, j)), "{}_jeoc{}".format(name, j))
+            end_extra = _mul1(end_over, seg_arc[nseg - 1], "{}_jeex{}".format(name, j))
+            start_over = _max0(_mul1(
+                _sub1(remap[0], t_j, "{}_jsen{}".format(name, j)),
+                _sub1(remap[1], remap[0], "{}_jsed{}".format(name, j)),
+                "{}_jse{}".format(name, j), divide=True), "{}_jsoc{}".format(name, j))
+            start_extra = _mul1(start_over, seg_arc[0], "{}_jsex{}".format(name, j))
+            net = _sub1(end_extra, start_extra, "{}_jnet{}".format(name, j))
+            pos_plug = _add(jp + ".position",
+                            _scale_vp(jp + ".normalizedTangent", net,
+                                      "{}_jeov{}".format(name, j)),
+                            "{}_jpos{}".format(name, j))
+        else:
+            pos_plug = jp + ".position"
         jt = cmds.createNode("joint", name="{}_jnt{}".format(name, j), parent=grp)
-        _build_frame(jp + ".normalizedTangent", up, jp + ".position", jt,
+        _build_frame(jp + ".normalizedTangent", up, pos_plug, jt,
                      "{}_frame{}".format(name, j))
         joints.append(jt)
 
