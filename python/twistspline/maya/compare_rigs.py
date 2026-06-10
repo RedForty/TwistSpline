@@ -453,6 +453,19 @@ def parity_suite(cv_positions=None, numJoints=10, spread=1.0,
         cmds.setAttr(tn + ".translate", 0, 0, 0)
         cmds.setAttr(tc + ".translate", 0, 0, 0)
 
+    # master Offset / Stretch globals (shared-control native has a master). Values
+    # kept in-range -- every joint's effective param (param*Stretch + Offset) stays
+    # within [0,1] -- since past the curve end the native clamps but C++ extrapolates
+    # along the tangent (a documented difference, not a formula error).
+    if use_production and nat.get("master") and cpp_d.get("master"):
+        mn, mc = nat["master"], cpp_d["master"]
+        for off, st in [(0.0, 0.8), (0.0, 0.6), (0.1, 0.8), (0.2, 0.7), (0.15, 0.85)]:
+            setb(mn + ".Offset", mc + ".Offset", off)
+            setb(mn + ".Stretch", mc + ".Stretch", st)
+            chk("master Offset={:.2f} Stretch={:.2f}".format(off, st))
+        setb(mn + ".Offset", mc + ".Offset", 0.0)
+        setb(mn + ".Stretch", mc + ".Stretch", 1.0)
+
     # combined pose
     xb(cv_n[1], cv_c[1], [cv_positions[1][k] + [1, 2, -1][k] for k in range(3)])
     setb(tw_n[2] + ".rotateX", tw_c[2] + ".rotateX", 50)
