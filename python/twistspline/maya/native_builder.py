@@ -930,12 +930,31 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
     seg_arc = [_sub1(arc_cv[k + 1], arc_cv[k], "{}_segarc{}".format(name, k))
                for k in range(nseg)]
     total_arc = arc_cv[-1]
+    # Master globals (shared-control rig): Offset slides the whole joint chain along
+    # the curve, Stretch scales the distribution -- the C++ rider's globalOffset /
+    # globalSpread. Each joint's param becomes (param*Stretch + Offset*paramRange)
+    # before the remap, matching params[i]*gSpread + gOffset normalized to the range.
+    master = (controls or {}).get("master")
+    if (master and cmds.objExists(master)
+            and cmds.attributeQuery("Offset", node=master, exists=True)):
+        off_plug, str_plug = master + ".Offset", master + ".Stretch"
+    else:
+        off_plug = str_plug = None
     joints = []
     for j in range(num_joints):
-        t_j = pmin + (pmax - pmin) * j / (num_joints - 1.0) if num_joints > 1 else pmin
+        t_base = pmin + (pmax - pmin) * j / (num_joints - 1.0) if num_joints > 1 else pmin
+        if off_plug is not None:                 # live Offset/Stretch
+            t_j = _add1(_scale1(str_plug, t_base, "{}_jstr{}".format(name, j)),
+                        _scale1(off_plug, pmax, "{}_joff{}".format(name, j)),
+                        "{}_jt{}".format(name, j))
+        else:
+            t_j = t_base
         cterms = []
         for k in range(nseg):
-            inv = _mul1(_sub_cp(t_j, remap[k], "{}_jin{}_{}".format(name, j, k)),
+            num = (_sub1(t_j, remap[k], "{}_jin{}_{}".format(name, j, k))
+                   if off_plug is not None
+                   else _sub_cp(t_j, remap[k], "{}_jin{}_{}".format(name, j, k)))
+            inv = _mul1(num,
                         _sub1(remap[k + 1], remap[k], "{}_jid{}_{}".format(name, j, k)),
                         "{}_ji{}_{}".format(name, j, k), divide=True)
             cterms.append(_clamp01(inv, "{}_jc{}_{}".format(name, j, k)))
@@ -963,14 +982,16 @@ def build_native_spline(cv_positions, num_joints, spread=3.0, name="nativeTS",
 
 
 def adapt_shared_controls(grp, cv_ctrls, twist_ctrls, o_ctrls, i_ctrls,
-                          o_bufs, i_bufs, o_rests, i_rests):
+                          o_bufs, i_bufs, o_rests, i_rests, master=None):
     """Map the production control rig (builder.mkTwistSplineControllers) into the
     dict build_native_spline(controls=...) expects. The per-segment tangent lists
     are padded to length n (out at i=0..n-2, in at i=1..n-1), and the rest buffers
-    are decomposed to world-space point plugs (the Auto=0 reference).
+    are decomposed to world-space point plugs (the Auto=0 reference). `master`, if
+    given, drives the joint chain's Offset/Stretch globals.
     """
     return {
         "grp": grp,
+        "master": master,
         "cv_ctrls": list(cv_ctrls),
         "twist_ctrl": list(twist_ctrls),
         "out_ctrl": list(o_ctrls) + [None],

@@ -94,7 +94,7 @@ def build(name, cv_positions=None, num_cvs=None, num_joints=10, rig_type="native
         # the whole rig through the controls, exactly like the C++/python backends.
         grp = cmds.createNode("transform", name=name + "_nativeGrp")
         controls = native_builder.adapt_shared_controls(
-            grp, cvs, tws, oCtrls, iCtrls, oBfrs, iBfrs, oRests, iRests)
+            grp, cvs, tws, oCtrls, iCtrls, oBfrs, iBfrs, oRests, iRests, master=master)
         rig = native_builder.build_native_spline(
             cv_positions, num_joints, spread=spread, name=name, controls=controls)
         native_builder.hide_guts(rig)        # tuck away upCurve + arcLength indicators
